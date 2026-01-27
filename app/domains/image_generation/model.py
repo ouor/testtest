@@ -8,6 +8,9 @@ import torch
 from diffusers import ZImagePipeline
 
 
+IMAGE_DEVICE = "cuda"
+
+
 @dataclass
 class ZImageTurboModel:
     pipe: ZImagePipeline
@@ -16,7 +19,7 @@ class ZImageTurboModel:
     @classmethod
     def load_from_env(cls) -> "ZImageTurboModel":
         model_name = os.getenv("IMAGE_MODEL_NAME", "Tongyi-MAI/Z-Image-Turbo")
-        device = os.getenv("IMAGE_DEVICE", "cuda")
+        device = IMAGE_DEVICE
 
         if device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA requested but torch.cuda.is_available() is False")

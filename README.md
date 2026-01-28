@@ -41,16 +41,23 @@ Environment variables:
 
 ## Image search (upload + semantic search)
 
-This feature lets you upload images, keep them in a server-side temporary directory, and search by text using a CLIP-style embedding model.
+This feature lets you upload images, keep them in a server-side directory, and search by text using a CLIP-style embedding model.
 
 Notes:
 - Images are identified by a server-generated UUID.
-- Storage and index are in-memory; restart clears the registry.
-- Uploaded image bytes are stored under a `tempfile` directory created at startup and cleaned up on shutdown.
+- The vector index + image metadata are stored in `IMAGE_SEARCH_DB_PATH` (default: `app/image_search.db`).
+- Uploaded image bytes are stored under `IMAGE_SEARCH_FILES_DIR` (default: `app/image_search_files/`).
+- Restart keeps the registry, since both are persisted under `app/`.
 - Image search requires CUDA. If you don't have CUDA, set `IMAGE_SEARCH_ENABLED=0`.
+
+Embedding model:
+- Hardcoded: `Bingsu/clip-vit-large-patch14-ko` (no `IMAGE_SEARCH_MODEL_NAME` env)
 
 Environment variables:
 - `IMAGE_SEARCH_ENABLED` (default: `1`) - set `0` to disable image search init
+- `IMAGE_SEARCH_DB_PATH` (default: `app/image_search.db`) - SQLite file path for the vector DB (relative paths are resolved from the project root)
+- `IMAGE_SEARCH_FILES_DIR` (default: `app/image_search_files/`) - directory where uploaded images are stored (relative paths are resolved from the project root)
+- `IMAGE_SEARCH_MAX_ELEMENTS` (default: `50000`) - HNSW capacity for the vectorlite index
 - `IMAGE_SEARCH_MAX_BYTES` (default: `20971520`) - max upload size per image
 
 Endpoints (all under `/v1`):

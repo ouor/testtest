@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 import anyio
 import torch
 from fastapi import Request, UploadFile
 
 from app.core.errors.exceptions import AppError, InferenceError, ModelLoadError, OutOfMemoryError
-from app.domains.image_search.model import IMAGE_SEARCH_KEY, ImageRecord
+from app.domains.image_search.model import IMAGE_SEARCH_KEY, ImageRecord, _safe_suffix
 from app.domains.image_search.schemas import SearchImagesRequest
 
 
@@ -26,13 +27,11 @@ async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
     if not raw:
         raise AppError(code="EMPTY_FILE", message="Uploaded file is empty", http_status=400)
 
-    max_bytes = int((__import__("os").getenv("IMAGE_SEARCH_MAX_BYTES", str(20 * 1024 * 1024))))
+    max_bytes = int(os.getenv("IMAGE_SEARCH_MAX_BYTES", str(20 * 1024 * 1024)))
     if len(raw) > max_bytes:
         raise AppError(code="FILE_TOO_LARGE", message="Uploaded file is too large", http_status=413)
 
     image_id = state.new_id()
-
-    from app.domains.image_search.model import _safe_suffix
 
     suffix = _safe_suffix(file.filename)
     path = state.blob_store.save(image_id=image_id, data=raw, suffix=suffix)
@@ -64,9 +63,17 @@ async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
         size_bytes=len(raw),
     )
 
-    async with state.lock:
-        state.records[image_id] = record
-        state.vector_index.upsert(item_id=image_id, vector=vec)
+    try:
+        async with state.lock:
+            upsert_image = getattr(state.vector_index, "upsert_image", None)
+            if callable(upsert_image):
+                upsert_image(record=record, vector=vec)
+            else:
+                state.vector_index.upsert(item_id=image_id, vector=vec)
+                state.record_store.upsert_record(record)
+    except Exception as exc:
+        state.blob_store.delete(path=path)
+        raise InferenceError(detail=str(exc)) from exc
 
     return record
 
@@ -74,8 +81,14 @@ async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
 async def delete_image(request: Request, *, image_id: str) -> None:
     state = _get_state(request)
     async with state.lock:
-        record = state.records.pop(image_id, None)
-        state.vector_index.delete(item_id=image_id)
+        record = state.record_store.get_record(image_id=image_id)
+        if record is not None:
+            delete_image_all = getattr(state.vector_index, "delete_image", None)
+            if callable(delete_image_all):
+                delete_image_all(image_id=image_id)
+            else:
+                state.record_store.delete_record(image_id=image_id)
+                state.vector_index.delete(item_id=image_id)
 
     if record is None:
         raise AppError(code="NOT_FOUND", message="Image not found", http_status=404)
@@ -86,9 +99,7 @@ async def delete_image(request: Request, *, image_id: str) -> None:
 async def list_images(request: Request) -> list[ImageRecord]:
     state = _get_state(request)
     async with state.lock:
-        records = list(state.records.values())
-    records.sort(key=lambda r: r.id)
-    return records
+        return state.record_store.list_records()
 
 
 async def search_images(request: Request, *, payload: SearchImagesRequest) -> list[tuple[str, float]]:
@@ -117,7 +128,18 @@ async def search_images(request: Request, *, payload: SearchImagesRequest) -> li
 async def get_image_record(request: Request, *, image_id: str) -> ImageRecord:
     state = _get_state(request)
     async with state.lock:
-        record = state.records.get(image_id)
-    if record is None:
-        raise AppError(code="NOT_FOUND", message="Image not found", http_status=404)
-    return record
+        record = state.record_store.get_record(image_id=image_id)
+        if record is None:
+            raise AppError(code="NOT_FOUND", message="Image not found", http_status=404)
+
+        # If the underlying file is missing, self-heal by removing DB entries.
+        if not record.path.exists():
+            delete_image_all = getattr(state.vector_index, "delete_image", None)
+            if callable(delete_image_all):
+                delete_image_all(image_id=image_id)
+            else:
+                state.record_store.delete_record(image_id=image_id)
+                state.vector_index.delete(item_id=image_id)
+            raise AppError(code="NOT_FOUND", message="Image not found", http_status=404)
+
+        return record

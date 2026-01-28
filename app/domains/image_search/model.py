@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +12,12 @@ import torch
 from PIL import Image
 from transformers import AutoModel, AutoProcessor
 
+from app.domains.image_search.vectordb import (
+    ImageRecord,
+    ImageRecordStore,
+    VectorIndex,
+    VectorliteVectorIndex,
+)
 
 IMAGE_SEARCH_KEY = "image_search"
 
@@ -29,60 +34,6 @@ def _safe_suffix(filename: str | None) -> str:
     if not suffix or len(suffix) > 16:
         return ".bin"
     return suffix
-
-
-def _normalize(vec: np.ndarray) -> np.ndarray:
-    vec = vec.astype(np.float32, copy=False)
-    denom = float(np.linalg.norm(vec) + 1e-8)
-    return vec / denom
-
-
-class VectorIndex(Protocol):
-    def upsert(self, *, item_id: str, vector: np.ndarray) -> None: ...
-
-    def delete(self, *, item_id: str) -> None: ...
-
-    def search(self, *, vector: np.ndarray, limit: int) -> list[tuple[str, float]]: ...
-
-    def ids(self) -> list[str]: ...
-
-
-class InMemoryVectorIndex:
-    def __init__(self) -> None:
-        self._vectors: dict[str, np.ndarray] = {}
-
-    def upsert(self, *, item_id: str, vector: np.ndarray) -> None:
-        self._vectors[item_id] = _normalize(vector)
-
-    def delete(self, *, item_id: str) -> None:
-        self._vectors.pop(item_id, None)
-
-    def search(self, *, vector: np.ndarray, limit: int) -> list[tuple[str, float]]:
-        if not self._vectors or limit <= 0:
-            return []
-
-        q = _normalize(vector)
-        ids = list(self._vectors.keys())
-        mat = np.stack([self._vectors[i] for i in ids], axis=0)  # (n, d)
-        scores = mat @ q  # (n,)
-
-        k = min(limit, scores.shape[0])
-        # argpartition for top-k then sort
-        top_idx = np.argpartition(-scores, k - 1)[:k]
-        top_idx = top_idx[np.argsort(-scores[top_idx])]
-        return [(ids[int(i)], float(scores[int(i)])) for i in top_idx]
-
-    def ids(self) -> list[str]:
-        return list(self._vectors.keys())
-
-
-@dataclass(frozen=True)
-class ImageRecord:
-    id: str
-    path: Path
-    content_type: str
-    original_filename: str | None
-    size_bytes: int
 
 
 class BlobStore(Protocol):
@@ -156,38 +107,72 @@ class ClipEmbedder:
 
 @dataclass
 class ImageSearchState:
-    temp_dir: tempfile.TemporaryDirectory
     blob_store: BlobStore
     vector_index: VectorIndex
+    record_store: ImageRecordStore
     embedder: ClipEmbedder
     lock: asyncio.Lock
-    records: dict[str, ImageRecord]
 
     def new_id(self) -> str:
         return str(uuid.uuid4())
 
     def close(self) -> None:
         try:
-            self.embedder.close()
-        finally:
-            try:
-                self.temp_dir.cleanup()
-            except Exception:
-                pass
+            close_fn = getattr(self.vector_index, "close", None)
+            if callable(close_fn):
+                close_fn()
+        except Exception:
+            pass
+        self.embedder.close()
 
 
 def create_state_from_env() -> ImageSearchState:
-    temp_dir = tempfile.TemporaryDirectory(prefix="image-search-")
-    base_dir = Path(temp_dir.name)
+    project_root = Path(__file__).resolve().parents[3]
+    app_dir = project_root / "app"
+
+    db_path_raw = (os.getenv("IMAGE_SEARCH_DB_PATH") or "").strip()
+    if db_path_raw:
+        db_path = Path(db_path_raw)
+        if not db_path.is_absolute():
+            db_path = project_root / db_path
+    else:
+        db_path = app_dir / "image_search.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    files_dir_raw = (os.getenv("IMAGE_SEARCH_FILES_DIR") or "").strip()
+    if files_dir_raw:
+        blob_dir = Path(files_dir_raw)
+        if not blob_dir.is_absolute():
+            blob_dir = project_root / blob_dir
+    else:
+        blob_dir = app_dir / "image_search_files"
+    blob_dir.mkdir(parents=True, exist_ok=True)
 
     embedder = ClipEmbedder.load_from_env()
+
+    max_elements_raw = (os.getenv("IMAGE_SEARCH_MAX_ELEMENTS") or "50000").strip()
+    try:
+        max_elements = int(max_elements_raw)
+    except Exception as exc:
+        raise RuntimeError("IMAGE_SEARCH_MAX_ELEMENTS must be an integer") from exc
+    if max_elements <= 0:
+        raise RuntimeError("IMAGE_SEARCH_MAX_ELEMENTS must be > 0")
+    # Derive embedding dim from the model.
+    dim_probe = embedder.embed_text("dim")
+    vector_dim = int(dim_probe.shape[0])
+
+    vector_index: VectorIndex = VectorliteVectorIndex(
+        db_path=db_path,
+        base_dir=blob_dir,
+        vector_dim=vector_dim,
+        max_elements=max_elements,
+    )
     return ImageSearchState(
-        temp_dir=temp_dir,
-        blob_store=TempDirBlobStore(base_dir=base_dir),
-        vector_index=InMemoryVectorIndex(),
+        blob_store=TempDirBlobStore(base_dir=blob_dir),
+        vector_index=vector_index,
+        record_store=vector_index,
         embedder=embedder,
         lock=asyncio.Lock(),
-        records={},
     )
 
 

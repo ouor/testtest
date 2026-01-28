@@ -187,3 +187,10 @@ pyrightconfig.json
 test/val2017/
 
 # End of test data
+
+# image search files
+
+*.db
+image_search_files/
+
+# End of image search files

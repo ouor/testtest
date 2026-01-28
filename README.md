@@ -29,7 +29,6 @@ curl -s http://localhost:8000/v1/images/generate \
 
 Environment variables:
 - `IMAGE_ENABLED` (default: `1`) - set `0` to skip image model loading
-- `IMAGE_MODEL_NAME` (default: `Tongyi-MAI/Z-Image-Turbo`)
 
 ## Image search (upload + semantic search)
 
@@ -39,25 +38,25 @@ Notes:
 - Images are identified by a server-generated UUID.
 - Storage and index are in-memory; restart clears the registry.
 - Uploaded image bytes are stored under a `tempfile` directory created at startup and cleaned up on shutdown.
+- Image search requires CUDA. If you don't have CUDA, set `IMAGE_SEARCH_ENABLED=0`.
 
 Environment variables:
 - `IMAGE_SEARCH_ENABLED` (default: `1`) - set `0` to disable image search init
-- `IMAGE_SEARCH_MODEL_NAME` (default: `Bingsu/clip-vit-large-patch14-ko`)
 - `IMAGE_SEARCH_MAX_BYTES` (default: `20971520`) - max upload size per image
 
 Endpoints (all under `/v1`):
 - `POST /images` (multipart) - upload an image, returns `{id, ...}`
 - `DELETE /images/{id}` - delete by UUID
-- `GET /images` - list all images (UUID + original filename)
+- `GET /images` - list all images (UUID + original filename + metadata)
 - `POST /images/search` - text search, returns `[{id, score}]`
 - `GET /images/{id}/file` - download image bytes
 
 Example (upload → list → search → download → delete):
 
 ```bash
-# Upload
-curl -s http://localhost:8000/v1/images \
-  -F "file=@test/image01.jpg"
+# Upload (capture UUID)
+ID=$(curl -s http://localhost:8000/v1/images \
+  -F "file=@test/image01.jpg" | python -c "import sys, json; print(json.load(sys.stdin)['id'])")
 
 # Upload multiple sample images
 for f in test/image0{1..5}.jpg; do
@@ -87,7 +86,6 @@ Enable voice model loading at startup:
 
 ```bash
 export VOICE_ENABLED=1
-export VOICE_MODEL_NAME="Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 ```
 
 Generate voice (multipart form upload):

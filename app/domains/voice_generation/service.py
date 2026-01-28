@@ -10,6 +10,7 @@ from typing import Any
 import anyio
 import torch
 import torchaudio
+from botocore.exceptions import ClientError
 from fastapi import Request, UploadFile
 
 from app.core.errors.exceptions import InferenceError, ModelLoadError, OutOfMemoryError
@@ -56,12 +57,20 @@ def _encode_mp3_bytes(waveform: torch.Tensor, sample_rate: int) -> bytes:
             pass
 
 
-async def generate_voice_mp3(
-    request: Request,
-    *,
-    ref_audio: UploadFile,
-    payload: GenerateVoiceRequest,
-) -> bytes:
+def _r2_error_code(exc: ClientError) -> str:
+    try:
+        return str(exc.response.get("Error", {}).get("Code") or "")
+    except Exception:
+        return ""
+
+
+def _is_r2_not_found(exc: ClientError) -> bool:
+    code = _r2_error_code(exc)
+    # S3-style "NoSuchKey" is typical; some stacks return 404-like codes.
+    return code in {"NoSuchKey", "NotFound", "404"}
+
+
+def _get_voice_model_and_limit(request: Request):
     model = request.app.state.models.get(VOICE_MODEL_KEY)
     if model is None:
         raise ModelLoadError("Voice model is not loaded")
@@ -71,6 +80,49 @@ async def generate_voice_mp3(
     except Exception as exc:
         raise ModelLoadError("Concurrency limits not initialized") from exc
 
+    return model, limit
+
+
+async def _generate_voice_mp3_core(
+    request: Request,
+    *,
+    ref_audio_path: str,
+    payload: GenerateVoiceRequest,
+) -> bytes:
+    model, limit = _get_voice_model_and_limit(request)
+
+    async with limit.semaphore:
+        try:
+            make_prompt = partial(
+                model.create_voice_clone_prompt,
+                ref_audio_path=ref_audio_path,
+                ref_text=payload.ref_text,
+            )
+            prompt = await anyio.to_thread.run_sync(make_prompt)
+
+            do_generate = partial(
+                model.generate_voice_clone,
+                text=payload.text,
+                language=payload.language,
+                voice_clone_prompt=prompt,
+            )
+            wav, sr = await anyio.to_thread.run_sync(do_generate)
+
+            waveform = _to_mono_tensor(wav)
+            mp3_bytes = await anyio.to_thread.run_sync(_encode_mp3_bytes, waveform, int(sr))
+            return mp3_bytes
+        except torch.cuda.OutOfMemoryError as exc:
+            raise OutOfMemoryError(detail=str(exc)) from exc
+        except Exception as exc:
+            raise InferenceError(detail=str(exc)) from exc
+
+
+async def generate_voice_mp3(
+    request: Request,
+    *,
+    ref_audio: UploadFile,
+    payload: GenerateVoiceRequest,
+) -> bytes:
     # Persist uploaded audio to a temp file because qwen-tts expects a file path.
     suffix = _safe_suffix(ref_audio.filename)
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_ref:
@@ -80,30 +132,7 @@ async def generate_voice_mp3(
         data = await ref_audio.read()
         await anyio.to_thread.run_sync(Path(ref_path).write_bytes, data)
 
-        async with limit.semaphore:
-            try:
-                make_prompt = partial(
-                    model.create_voice_clone_prompt,
-                    ref_audio_path=ref_path,
-                    ref_text=payload.ref_text,
-                )
-                prompt = await anyio.to_thread.run_sync(make_prompt)
-
-                do_generate = partial(
-                    model.generate_voice_clone,
-                    text=payload.text,
-                    language=payload.language,
-                    voice_clone_prompt=prompt,
-                )
-                wav, sr = await anyio.to_thread.run_sync(do_generate)
-
-                waveform = _to_mono_tensor(wav)
-                mp3_bytes = await anyio.to_thread.run_sync(_encode_mp3_bytes, waveform, int(sr))
-                return mp3_bytes
-            except torch.cuda.OutOfMemoryError as exc:
-                raise OutOfMemoryError(detail=str(exc)) from exc
-            except Exception as exc:
-                raise InferenceError(detail=str(exc)) from exc
+        return await _generate_voice_mp3_core(request, ref_audio_path=ref_path, payload=payload)
     finally:
         try:
             os.remove(ref_path)
@@ -126,59 +155,43 @@ async def generate_voice_mp3_to_r2(request: Request, *, payload: GenerateVoiceTo
 
     try:
         # boto3 is sync; run in worker thread.
-        ref_bytes = await anyio.to_thread.run_sync(partial(r2.download_bytes, key=payload.ref_audio_key))
+        try:
+            ref_bytes = await anyio.to_thread.run_sync(partial(r2.download_bytes, key=payload.ref_audio_key))
+        except ClientError as exc:
+            if _is_r2_not_found(exc):
+                raise AppError(
+                    code="R2_KEY_NOT_FOUND",
+                    message="Reference audio key not found in R2",
+                    http_status=404,
+                    detail={"key": payload.ref_audio_key, "error_code": _r2_error_code(exc)},
+                ) from exc
+            raise AppError(
+                code="R2_DOWNLOAD_FAILED",
+                message="Failed to download reference audio from R2",
+                http_status=502,
+                detail={"key": payload.ref_audio_key, "error_code": _r2_error_code(exc)},
+            ) from exc
         await anyio.to_thread.run_sync(Path(ref_path).write_bytes, ref_bytes)
 
-        # Reuse existing generation pipeline.
-        class _UploadLike:
-            filename = None
-
-            async def read(self):
-                return ref_bytes
-
-        # We can't pass UploadFile easily without Starlette internals; call the core logic inline.
-        model = request.app.state.models.get(VOICE_MODEL_KEY)
-        if model is None:
-            raise ModelLoadError("Voice model is not loaded")
-
-        try:
-            limit = request.app.state.limits.get(VOICE_MODEL_KEY)
-        except Exception as exc:
-            raise ModelLoadError("Concurrency limits not initialized") from exc
-
-        async with limit.semaphore:
-            try:
-                make_prompt = partial(
-                    model.create_voice_clone_prompt,
-                    ref_audio_path=ref_path,
-                    ref_text=payload.ref_text,
-                )
-                prompt = await anyio.to_thread.run_sync(make_prompt)
-
-                do_generate = partial(
-                    model.generate_voice_clone,
-                    text=payload.text,
-                    language=payload.language,
-                    voice_clone_prompt=prompt,
-                )
-                wav, sr = await anyio.to_thread.run_sync(do_generate)
-
-                waveform = _to_mono_tensor(wav)
-                mp3_bytes = await anyio.to_thread.run_sync(_encode_mp3_bytes, waveform, int(sr))
-            except torch.cuda.OutOfMemoryError as exc:
-                raise OutOfMemoryError(detail=str(exc)) from exc
-            except Exception as exc:
-                raise InferenceError(detail=str(exc)) from exc
+        mp3_bytes = await _generate_voice_mp3_core(request, ref_audio_path=ref_path, payload=payload)
 
         out_key = payload.key or f"voice/generated/{uuid.uuid4()}.mp3"
-        await anyio.to_thread.run_sync(
-            partial(
-                r2.upload_bytes,
-                key=out_key,
-                data=mp3_bytes,
-                content_type="audio/mpeg",
+        try:
+            await anyio.to_thread.run_sync(
+                partial(
+                    r2.upload_bytes,
+                    key=out_key,
+                    data=mp3_bytes,
+                    content_type="audio/mpeg",
+                )
             )
-        )
+        except ClientError as exc:
+            raise AppError(
+                code="R2_UPLOAD_FAILED",
+                message="Failed to upload generated audio to R2",
+                http_status=502,
+                detail={"key": out_key, "error_code": _r2_error_code(exc)},
+            ) from exc
         return out_key
     finally:
         try:

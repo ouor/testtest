@@ -108,7 +108,7 @@ class ClipEmbedder:
 @dataclass
 class ImageSearchState:
     blob_store: BlobStore
-    vector_index: VectorIndex
+    vector_index: VectorliteVectorIndex
     record_store: ImageRecordStore
     embedder: ClipEmbedder
     lock: asyncio.Lock
@@ -118,11 +118,18 @@ class ImageSearchState:
 
     def close(self) -> None:
         try:
-            close_fn = getattr(self.vector_index, "close", None)
-            if callable(close_fn):
-                close_fn()
+            self.vector_index.close()
         except Exception:
             pass
+
+        try:
+            if self.record_store is not self.vector_index:
+                close_fn = getattr(self.record_store, "close", None)
+                if callable(close_fn):
+                    close_fn()
+        except Exception:
+            pass
+
         self.embedder.close()
 
 
@@ -161,7 +168,7 @@ def create_state_from_env() -> ImageSearchState:
     dim_probe = embedder.embed_text("dim")
     vector_dim = int(dim_probe.shape[0])
 
-    vector_index: VectorIndex = VectorliteVectorIndex(
+    vector_index = VectorliteVectorIndex(
         db_path=db_path,
         base_dir=blob_dir,
         vector_dim=vector_dim,

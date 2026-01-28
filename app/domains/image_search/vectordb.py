@@ -64,7 +64,15 @@ class VectorliteVectorIndex:
 
         self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self.conn.enable_load_extension(True)
-        self.conn.load_extension(vectorlite_py.vectorlite_path())
+        try:
+            ext_path = vectorlite_py.vectorlite_path()
+            self.conn.load_extension(ext_path)
+        except sqlite3.OperationalError as exc:
+            raise RuntimeError(
+                "Failed to load vectorlite SQLite extension. "
+                "Ensure vectorlite is installed and your SQLite build allows extensions. "
+                f"extension_path={ext_path}"
+            ) from exc
 
         self._init_schema()
 

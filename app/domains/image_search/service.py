@@ -65,12 +65,7 @@ async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
 
     try:
         async with state.lock:
-            upsert_image = getattr(state.vector_index, "upsert_image", None)
-            if callable(upsert_image):
-                upsert_image(record=record, vector=vec)
-            else:
-                state.vector_index.upsert(item_id=image_id, vector=vec)
-                state.record_store.upsert_record(record)
+            state.vector_index.upsert_image(record=record, vector=vec)
     except Exception as exc:
         state.blob_store.delete(path=path)
         raise InferenceError(detail=str(exc)) from exc
@@ -83,12 +78,7 @@ async def delete_image(request: Request, *, image_id: str) -> None:
     async with state.lock:
         record = state.record_store.get_record(image_id=image_id)
         if record is not None:
-            delete_image_all = getattr(state.vector_index, "delete_image", None)
-            if callable(delete_image_all):
-                delete_image_all(image_id=image_id)
-            else:
-                state.record_store.delete_record(image_id=image_id)
-                state.vector_index.delete(item_id=image_id)
+            state.vector_index.delete_image(image_id=image_id)
 
     if record is None:
         raise AppError(code="NOT_FOUND", message="Image not found", http_status=404)
@@ -134,12 +124,7 @@ async def get_image_record(request: Request, *, image_id: str) -> ImageRecord:
 
         # If the underlying file is missing, self-heal by removing DB entries.
         if not record.path.exists():
-            delete_image_all = getattr(state.vector_index, "delete_image", None)
-            if callable(delete_image_all):
-                delete_image_all(image_id=image_id)
-            else:
-                state.record_store.delete_record(image_id=image_id)
-                state.vector_index.delete(item_id=image_id)
+            state.vector_index.delete_image(image_id=image_id)
             raise AppError(code="NOT_FOUND", message="Image not found", http_status=404)
 
         return record

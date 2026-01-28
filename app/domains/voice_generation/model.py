@@ -7,8 +7,6 @@ import torch
 
 
 VOICE_MODEL_KEY = "qwen3_tts"
-VOICE_DEVICE = "cuda"
-VOICE_ATTN_IMPLEMENTATION = "flash_attention_2"
 
 
 @dataclass
@@ -21,20 +19,18 @@ class Qwen3TTSModelWrapper:
         # Lazy import so the server can still start when voice is disabled.
         from qwen_tts import Qwen3TTSModel  # type: ignore
 
-        model_name = os.getenv("VOICE_MODEL_NAME", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-        device = VOICE_DEVICE
-        attn_implementation = VOICE_ATTN_IMPLEMENTATION
+        model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 
-        if device == "cuda" and not torch.cuda.is_available():
+        if not torch.cuda.is_available():
             raise RuntimeError("CUDA requested but torch.cuda.is_available() is False")
 
         model = Qwen3TTSModel.from_pretrained(
             model_name,
             dtype=torch.bfloat16,
-            attn_implementation=attn_implementation,
-            device_map=device,
+            attn_implementation="flash_attention_2",
+            device_map="cuda",
         )
-        return cls(model=model, device=device)
+        return cls(model=model, device="cuda")
 
     def create_voice_clone_prompt(self, *, ref_audio_path: str, ref_text: str):
         return self.model.create_voice_clone_prompt(

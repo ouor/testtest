@@ -13,6 +13,7 @@ from fastapi import Request, UploadFile
 
 from app.core.errors.exceptions import InferenceError, ModelLoadError, OutOfMemoryError
 from app.domains.voice_generation.model import VOICE_MODEL_KEY
+from app.domains.voice_generation.schemas import GenerateVoiceRequest
 
 def _safe_suffix(filename: str | None) -> str:
     if not filename:
@@ -57,9 +58,7 @@ async def generate_voice_mp3(
     request: Request,
     *,
     ref_audio: UploadFile,
-    ref_text: str,
-    text: str,
-    language: str,
+    payload: GenerateVoiceRequest,
 ) -> bytes:
     model = request.app.state.models.get(VOICE_MODEL_KEY)
     if model is None:
@@ -81,13 +80,17 @@ async def generate_voice_mp3(
 
         async with limit.semaphore:
             try:
-                make_prompt = partial(model.create_voice_clone_prompt, ref_audio_path=ref_path, ref_text=ref_text)
+                make_prompt = partial(
+                    model.create_voice_clone_prompt,
+                    ref_audio_path=ref_path,
+                    ref_text=payload.ref_text,
+                )
                 prompt = await anyio.to_thread.run_sync(make_prompt)
 
                 do_generate = partial(
                     model.generate_voice_clone,
-                    text=text,
-                    language=language,
+                    text=payload.text,
+                    language=payload.language,
                     voice_clone_prompt=prompt,
                 )
                 wav, sr = await anyio.to_thread.run_sync(do_generate)

@@ -8,16 +8,18 @@ import torch
 from fastapi import Request
 
 from app.core.errors.exceptions import InferenceError, ModelLoadError, OutOfMemoryError
+
 from app.domains.image_generation.schemas import GenerateImageRequest
+from app.domains.image_generation.model import IMAGE_MODEL_KEY
 
 
 async def generate_image_png(request: Request, payload: GenerateImageRequest) -> bytes:
-    model = request.app.state.models.get("zimage_turbo")
+    model = request.app.state.models.get(IMAGE_MODEL_KEY)
     if model is None:
         raise ModelLoadError("Image model is not loaded")
 
     try:
-        limit = request.app.state.limits.get("zimage_turbo")
+        limit = request.app.state.limits.get(IMAGE_MODEL_KEY)
     except Exception as exc:
         raise ModelLoadError("Concurrency limits not initialized") from exc
 

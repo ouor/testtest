@@ -108,6 +108,19 @@ curl -s http://localhost:8000/v1/voice/generate \
   --output out.mp3
 ```
 
+R2 voice generation (ref_audio provided as an R2 key; returns output R2 key only):
+
+```bash
+curl -s http://localhost:8000/v1/r2/voice/generate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "ref_audio_key": "voice/refs/ref.mp3",
+    "ref_text": "아이.. 그게 참.. 난 정말 진심으로 말하고 있는거거든.. 요! 근데 그 쪽에서 자꾸 안 믿어주니까!",
+    "text": "오전 10시 30분에 예정된 미팅 일정을 다시 한번 확인해 주시겠어요?",
+    "language": "Korean"
+  }'
+```
+
 Notes:
 - Endpoint returns `audio/mpeg` bytes (mp3).
 - MP3 encoding uses `torchaudio`; depending on your environment, an ffmpeg-backed build may be required.

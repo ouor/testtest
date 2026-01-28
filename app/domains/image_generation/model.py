@@ -16,7 +16,7 @@ class ZImageTurboModel:
 
     @classmethod
     def load_from_env(cls) -> "ZImageTurboModel":
-        model_name = os.getenv("IMAGE_MODEL_NAME", "Tongyi-MAI/Z-Image-Turbo")
+        model_name = "Tongyi-MAI/Z-Image-Turbo"
         device = "cuda"
 
         if device == "cuda" and not torch.cuda.is_available():

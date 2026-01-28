@@ -19,6 +19,7 @@ if _env_path.exists():
 
 from app.core.errors.handlers import register_exception_handlers
 from app.domains.image_generation.router import router as image_router
+from app.domains.image_search.router import router as image_search_router
 from app.domains.voice_generation.router import router as voice_router
 from app.lifespan import lifespan
 
@@ -29,6 +30,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     app.include_router(image_router, prefix="/v1")
+    app.include_router(image_search_router, prefix="/v1")
     app.include_router(voice_router, prefix="/v1")
 
     @app.get("/healthz")
@@ -42,7 +44,12 @@ def create_app() -> FastAPI:
             "zimage_turbo": bool(models and models.get("zimage_turbo")),
             "qwen3_tts": bool(models and models.get("qwen3_tts")),
         }
-        return {"ready": any(model_status.values()), "models": model_status}
+        image_search_ready = bool(getattr(app.state, "image_search", None))
+        return {
+            "ready": any(model_status.values()) or image_search_ready,
+            "models": model_status,
+            "image_search": image_search_ready,
+        }
 
     return app
 

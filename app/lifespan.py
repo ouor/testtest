@@ -21,6 +21,28 @@ async def lifespan(app: FastAPI):
     app.state.models = {}
     app.state.limits = ModelSemaphoreRegistry()
 
+    # Optional image-search state (enabled by default).
+    app.state.image_search = None
+    try:
+        from app.domains.image_search.model import IMAGE_SEARCH_KEY, create_state_from_env, enabled_from_env
+
+        if enabled_from_env():
+            # Heavy init: do it once at startup.
+            image_search_state = await anyio.to_thread.run_sync(create_state_from_env)
+            app.state.image_search = image_search_state
+            app.state.limits.register(IMAGE_SEARCH_KEY, max_concurrency=1)
+            print("Initialized image search")
+    except Exception as exc:
+        # Fail fast if image-search was expected to be enabled.
+        try:
+            from app.domains.image_search.model import enabled_from_env
+
+            if enabled_from_env():
+                raise ModelLoadError("Failed to initialize image search", cause=exc) from exc
+        except Exception:
+            # If we cannot even read the flag, keep server boot behavior unchanged.
+            raise
+
     # Optional image model (enabled by default).
     if _env_truthy("IMAGE_ENABLED", "1"):
         try:
@@ -45,6 +67,14 @@ async def lifespan(app: FastAPI):
             raise ModelLoadError("Failed to load voice generation model", cause=exc) from exc
 
     yield
+
+    # Best-effort cleanup for image search.
+    image_search_state = getattr(app.state, "image_search", None)
+    if image_search_state is not None:
+        try:
+            await anyio.to_thread.run_sync(image_search_state.close)
+        except Exception:
+            pass
 
     # Best-effort cleanup.
     image_model = app.state.models.get("zimage_turbo")

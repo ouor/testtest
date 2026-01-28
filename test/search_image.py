@@ -32,7 +32,7 @@ class Clip():
 class SementicSearch:
     def __init__(self):
         self.clip = Clip()
-        self.dump = []
+        self.dump = {}
 
     def get_text_embedding(self, text):
         return self.clip.get_text_embedding(text)
@@ -42,12 +42,12 @@ class SementicSearch:
 
     def add_image(self, image_path):
         emb = self.get_image_embedding(image_path)
-        self.dump.append((image_path, emb))
+        self.dump[image_path] = emb
     
     def search(self, text, topk=5):
         text_emb = self.get_text_embedding(text)
         sims = []
-        for path, img_emb in self.dump:
+        for path, img_emb in self.dump.items():
             sim = np.dot(img_emb, text_emb) / (np.linalg.norm(img_emb) * np.linalg.norm(text_emb) + 1e-8)
             sims.append((path, sim))
         sims.sort(key=lambda x: x[1], reverse=True)

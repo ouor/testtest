@@ -31,6 +31,56 @@ Environment variables:
 - `IMAGE_ENABLED` (default: `1`) - set `0` to skip image model loading
 - `IMAGE_MODEL_NAME` (default: `Tongyi-MAI/Z-Image-Turbo`)
 
+## Image search (upload + semantic search)
+
+This feature lets you upload images, keep them in a server-side temporary directory, and search by text using a CLIP-style embedding model.
+
+Notes:
+- Images are identified by a server-generated UUID.
+- Storage and index are in-memory; restart clears the registry.
+- Uploaded image bytes are stored under a `tempfile` directory created at startup and cleaned up on shutdown.
+
+Environment variables:
+- `IMAGE_SEARCH_ENABLED` (default: `1`) - set `0` to disable image search init
+- `IMAGE_SEARCH_MODEL_NAME` (default: `Bingsu/clip-vit-large-patch14-ko`)
+- `IMAGE_SEARCH_MAX_BYTES` (default: `20971520`) - max upload size per image
+
+Endpoints (all under `/v1`):
+- `POST /images` (multipart) - upload an image, returns `{id, ...}`
+- `DELETE /images/{id}` - delete by UUID
+- `GET /images` - list all images (UUID + original filename)
+- `POST /images/search` - text search, returns `[{id, score}]`
+- `GET /images/{id}/file` - download image bytes
+
+Example (upload → list → search → download → delete):
+
+```bash
+# Upload
+curl -s http://localhost:8000/v1/images \
+  -F "file=@test/image01.jpg"
+
+# Upload multiple sample images
+for f in test/image0{1..5}.jpg; do
+  echo "Uploading $f"
+  curl -s http://localhost:8000/v1/images -F "file=@$f"
+  echo
+done
+
+# List
+curl -s http://localhost:8000/v1/images
+
+# Search
+curl -s http://localhost:8000/v1/images/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"고양이", "limit": 5}'
+
+# Download
+curl -s http://localhost:8000/v1/images/$ID/file --output downloaded.bin
+
+# Delete
+curl -s -X DELETE http://localhost:8000/v1/images/$ID
+```
+
 ## Voice generation (optional)
 
 Enable voice model loading at startup:

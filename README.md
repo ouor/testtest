@@ -102,3 +102,15 @@ curl -s http://localhost:8000/v1/voice/generate \
 Notes:
 - Endpoint returns `audio/mpeg` bytes (mp3).
 - MP3 encoding uses `torchaudio`; depending on your environment, an ffmpeg-backed build may be required.
+
+## Cloudflare R2 (optional)
+
+The server includes a small S3-compatible utility for Cloudflare R2 in [testtest/app/core/storage/r2.py](testtest/app/core/storage/r2.py).
+
+Environment variables:
+- `R2_ENABLED` (default: `0`) - set `1` to enable R2 client initialization
+- `R2_ACCOUNT_ID` (required unless `R2_ENDPOINT_URL` is provided)
+- `R2_ENDPOINT_URL` (optional) - override endpoint URL (otherwise derived from `R2_ACCOUNT_ID`)
+- `R2_ACCESS_KEY_ID` (required)
+- `R2_SECRET_ACCESS_KEY` (required)
+- `R2_BUCKET_NAME` (required)

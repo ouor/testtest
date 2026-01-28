@@ -15,9 +15,10 @@ qwen-tts
 # Server
 fastapi
 python-multipart
-python-dotenv
 uvicorn[standard]
 pillow
 
 # Utilities
 python-dotenv
+numpy
+boto3

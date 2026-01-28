@@ -21,6 +21,24 @@ async def lifespan(app: FastAPI):
     app.state.models = {}
     app.state.limits = ModelSemaphoreRegistry()
 
+    # Optional Cloudflare R2 client.
+    app.state.r2 = None
+    try:
+        from app.core.storage.r2 import R2Storage, r2_enabled_from_env
+
+        if r2_enabled_from_env():
+            app.state.r2 = await anyio.to_thread.run_sync(R2Storage.from_env)
+            print("Initialized Cloudflare R2 client")
+    except Exception as exc:
+        # Only fail startup if explicitly enabled.
+        try:
+            from app.core.storage.r2 import r2_enabled_from_env
+
+            if r2_enabled_from_env():
+                raise ModelLoadError("Failed to initialize Cloudflare R2", cause=exc) from exc
+        except Exception:
+            raise
+
     # Optional image-search state (enabled by default).
     app.state.image_search = None
     try:
@@ -67,6 +85,8 @@ async def lifespan(app: FastAPI):
             raise ModelLoadError("Failed to load voice generation model", cause=exc) from exc
 
     yield
+
+    # No explicit R2 cleanup required.
 
     # Best-effort cleanup for image search.
     image_search_state = getattr(app.state, "image_search", None)

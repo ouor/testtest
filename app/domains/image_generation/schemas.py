@@ -10,3 +10,11 @@ class GenerateImageRequest(BaseModel):
     num_inference_steps: int = Field(default=9, ge=1, le=50)
     guidance_scale: float = Field(default=0.0, ge=0.0, le=20.0)
     seed: int = Field(default=42, ge=0, le=2**31 - 1)
+
+
+class GenerateImageToR2Request(GenerateImageRequest):
+    key: str | None = Field(default=None, min_length=1, max_length=1024)
+
+
+class R2KeyResponse(BaseModel):
+    key: str

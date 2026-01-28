@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import uuid
 from functools import partial
 
 import anyio
@@ -9,7 +10,8 @@ from fastapi import Request
 
 from app.core.errors.exceptions import InferenceError, ModelLoadError, OutOfMemoryError
 
-from app.domains.image_generation.schemas import GenerateImageRequest
+from app.core.errors.exceptions import AppError
+from app.domains.image_generation.schemas import GenerateImageRequest, GenerateImageToR2Request
 from app.domains.image_generation.model import IMAGE_MODEL_KEY
 
 
@@ -43,3 +45,23 @@ async def generate_image_png(request: Request, payload: GenerateImageRequest) ->
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     return buf.getvalue()
+
+
+async def generate_image_png_to_r2(request: Request, payload: GenerateImageToR2Request) -> str:
+    r2 = getattr(request.app.state, "r2", None)
+    if r2 is None:
+        raise AppError(code="R2_NOT_ENABLED", message="Cloudflare R2 is not enabled", http_status=500)
+
+    png_bytes = await generate_image_png(request, payload)
+
+    key = payload.key or f"images/generated/{uuid.uuid4()}.png"
+
+    # boto3 is sync; run in worker thread.
+    upload = partial(
+        r2.upload_bytes,
+        key=key,
+        data=png_bytes,
+        content_type="image/png",
+    )
+    await anyio.to_thread.run_sync(upload)
+    return key

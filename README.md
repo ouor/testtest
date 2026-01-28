@@ -23,6 +23,15 @@ curl -s http://localhost:8000/v1/images/generate \
   --output out.png
 ```
 
+image generation (stores output in R2 and returns the R2 key only):
+```bash
+curl -s http://localhost:8000/v1/r2/images/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"A serene landscape with mountains and a river during sunset.","seed":42}'
+
+// {"key":"images/generated/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.png"}
+```
+
 ### Notes
 - Model loads once at startup (FastAPI lifespan).
 - Inference is serialized with a semaphore (`max_concurrency=1`).

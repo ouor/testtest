@@ -45,6 +45,11 @@ conda activate default
 conda install forge:uv
 uv pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Gradio demo 실행
+export DEMO_API_BASE_URL=http://localhost:8000
+export DEMO_TIMEOUT_SECONDS=60
+python -m demo
 ````
 
 ### 3.2 헬스 체크

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, File, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import RedirectResponse
 
 from app.core.errors.exceptions import AppError
 from app.domains.image_search.schemas import (
@@ -17,6 +17,7 @@ from app.domains.image_search.schemas import (
 from app.domains.image_search.service import (
     delete_image,
     get_image_record,
+    get_image_presigned_url,
     list_images,
     register_image,
     search_images,
@@ -36,8 +37,11 @@ def _validate_uuid(image_id: str) -> str:
 @router.post("/images", response_model=UploadImageResponse)
 async def upload_image_endpoint(request: Request, file: UploadFile = File(...)):
     record = await register_image(request, file=file)
+    if not record.r2_key:
+        raise AppError(code="R2_KEY_MISSING", message="Failed to persist image to R2", http_status=500)
     return UploadImageResponse(
         id=record.id,
+        r2_key=record.r2_key,
         original_filename=record.original_filename,
         content_type=record.content_type,
         size_bytes=record.size_bytes,
@@ -58,6 +62,7 @@ async def list_images_endpoint(request: Request):
         images=[
             ImageInfo(
                 id=r.id,
+                r2_key=r.r2_key,
                 original_filename=r.original_filename,
                 content_type=r.content_type,
                 size_bytes=r.size_bytes,
@@ -70,7 +75,19 @@ async def list_images_endpoint(request: Request):
 @router.post("/images/search", response_model=SearchImagesResponse)
 async def search_images_endpoint(request: Request, payload: SearchImagesRequest):
     results = await search_images(request, payload=payload)
-    return SearchImagesResponse(results=[SearchResult(id=i, score=s) for i, s in results])
+    return SearchImagesResponse(
+        results=[
+            SearchResult(
+                id=r.id,
+                r2_key=r.r2_key,
+                score=s,
+                original_filename=r.original_filename,
+                content_type=r.content_type,
+                size_bytes=r.size_bytes,
+            )
+            for r, s in results
+        ]
+    )
 
 
 @router.get(
@@ -80,4 +97,5 @@ async def search_images_endpoint(request: Request, payload: SearchImagesRequest)
 async def get_image_file_endpoint(request: Request, image_id: str):
     image_id = _validate_uuid(image_id)
     record = await get_image_record(request, image_id=image_id)
-    return FileResponse(path=str(record.path), media_type=record.content_type)
+    url = await get_image_presigned_url(request, image_id=image_id)
+    return RedirectResponse(url=url, status_code=307)

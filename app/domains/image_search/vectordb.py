@@ -19,10 +19,13 @@ def _normalize(vec: np.ndarray) -> np.ndarray:
 @dataclass(frozen=True)
 class ImageRecord:
     id: str
-    path: Path
+    # Backward compatible: older records used local files via rel_path.
+    # New records should prefer `r2_key`.
+    path: Path | None
     content_type: str
     original_filename: str | None
     size_bytes: int
+    r2_key: str | None = None
 
 
 class VectorIndex(Protocol):
@@ -84,12 +87,18 @@ class VectorliteVectorIndex:
             CREATE TABLE IF NOT EXISTS image_records (
                 image_id TEXT PRIMARY KEY,
                 rel_path TEXT NOT NULL,
+                r2_key TEXT,
                 content_type TEXT NOT NULL,
                 original_filename TEXT,
                 size_bytes INTEGER NOT NULL
             )
             """
         )
+
+        # Lightweight migration: older DBs won't have r2_key.
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(image_records)").fetchall()]
+        if "r2_key" not in cols:
+            self.conn.execute("ALTER TABLE image_records ADD COLUMN r2_key TEXT")
 
         self.conn.execute(
             f"""
@@ -119,7 +128,7 @@ class VectorliteVectorIndex:
         if vec.ndim != 1 or vec.shape[0] != self.vector_dim:
             raise ValueError(f"Unexpected vector shape: {tuple(vec.shape)}")
 
-        rel_path = os.fspath(Path(record.path).name)
+        rel_path = os.fspath(Path(record.path).name) if record.path is not None else ""
         blob = vec.tobytes()
 
         # One transaction: vector + metadata.
@@ -129,10 +138,11 @@ class VectorliteVectorIndex:
             self.conn.execute("INSERT INTO v_images(rowid, embedding) VALUES (?, ?)", (rowid, blob))
             self.conn.execute(
                 """
-                INSERT INTO image_records(image_id, rel_path, content_type, original_filename, size_bytes)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO image_records(image_id, rel_path, r2_key, content_type, original_filename, size_bytes)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(image_id) DO UPDATE SET
                     rel_path=excluded.rel_path,
+                    r2_key=excluded.r2_key,
                     content_type=excluded.content_type,
                     original_filename=excluded.original_filename,
                     size_bytes=excluded.size_bytes
@@ -140,6 +150,7 @@ class VectorliteVectorIndex:
                 (
                     record.id,
                     rel_path,
+                    record.r2_key,
                     record.content_type,
                     record.original_filename,
                     int(record.size_bytes),
@@ -176,14 +187,15 @@ class VectorliteVectorIndex:
             self.conn.execute("DELETE FROM image_ids WHERE rowid = ?", (rowid,))
 
     def upsert_record(self, record: ImageRecord) -> None:
-        rel_path = os.fspath(Path(record.path).name)
+        rel_path = os.fspath(Path(record.path).name) if record.path is not None else ""
         with self.conn:
             self.conn.execute(
             """
-            INSERT INTO image_records(image_id, rel_path, content_type, original_filename, size_bytes)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO image_records(image_id, rel_path, r2_key, content_type, original_filename, size_bytes)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(image_id) DO UPDATE SET
                 rel_path=excluded.rel_path,
+                r2_key=excluded.r2_key,
                 content_type=excluded.content_type,
                 original_filename=excluded.original_filename,
                 size_bytes=excluded.size_bytes
@@ -191,6 +203,7 @@ class VectorliteVectorIndex:
             (
                 record.id,
                 rel_path,
+                record.r2_key,
                 record.content_type,
                 record.original_filename,
                 int(record.size_bytes),
@@ -199,19 +212,21 @@ class VectorliteVectorIndex:
 
     def get_record(self, *, image_id: str) -> ImageRecord | None:
         row = self.conn.execute(
-            "SELECT image_id, rel_path, content_type, original_filename, size_bytes FROM image_records WHERE image_id = ?",
+            "SELECT image_id, rel_path, r2_key, content_type, original_filename, size_bytes FROM image_records WHERE image_id = ?",
             (image_id,),
         ).fetchone()
         if not row:
             return None
-        image_id_s, rel_path, content_type, original_filename, size_bytes = row
-        path = self.base_dir / str(rel_path)
+        image_id_s, rel_path, r2_key, content_type, original_filename, size_bytes = row
+        rel_path_s = str(rel_path or "")
+        path = (self.base_dir / rel_path_s) if rel_path_s else None
         return ImageRecord(
             id=str(image_id_s),
             path=path,
             content_type=str(content_type),
             original_filename=(None if original_filename is None else str(original_filename)),
             size_bytes=int(size_bytes),
+            r2_key=(None if r2_key is None else str(r2_key)),
         )
 
     def delete_record(self, *, image_id: str) -> None:
@@ -220,17 +235,19 @@ class VectorliteVectorIndex:
 
     def list_records(self) -> list[ImageRecord]:
         rows = self.conn.execute(
-            "SELECT image_id, rel_path, content_type, original_filename, size_bytes FROM image_records ORDER BY image_id"
+            "SELECT image_id, rel_path, r2_key, content_type, original_filename, size_bytes FROM image_records ORDER BY image_id"
         ).fetchall()
         out: list[ImageRecord] = []
-        for image_id, rel_path, content_type, original_filename, size_bytes in rows:
+        for image_id, rel_path, r2_key, content_type, original_filename, size_bytes in rows:
+            rel_path_s = str(rel_path or "")
             out.append(
                 ImageRecord(
                     id=str(image_id),
-                    path=self.base_dir / str(rel_path),
+                    path=(self.base_dir / rel_path_s) if rel_path_s else None,
                     content_type=str(content_type),
                     original_filename=(None if original_filename is None else str(original_filename)),
                     size_bytes=int(size_bytes),
+                    r2_key=(None if r2_key is None else str(r2_key)),
                 )
             )
         return out
@@ -246,7 +263,7 @@ class VectorliteVectorIndex:
         query_blob = vec.tobytes()
 
         sql = """
-            SELECT ids.image_id, v.distance
+            SELECT ids.image_id, rec.rel_path, rec.r2_key, rec.content_type, rec.original_filename, rec.size_bytes, v.distance
             FROM v_images v
             JOIN image_ids ids ON v.rowid = ids.rowid
             JOIN image_records rec ON rec.image_id = ids.image_id
@@ -255,7 +272,7 @@ class VectorliteVectorIndex:
         rows = self.conn.execute(sql, (query_blob, int(limit))).fetchall()
 
         results: list[tuple[str, float]] = []
-        for image_id, distance in rows:
+        for image_id, _rel_path, _r2_key, _content_type, _original_filename, _size_bytes, distance in rows:
             try:
                 sim = 1.0 - float(distance)
             except Exception:
@@ -263,6 +280,45 @@ class VectorliteVectorIndex:
             results.append((str(image_id), sim))
         results.sort(key=lambda x: x[1], reverse=True)
         return results
+
+    def search_records(self, *, vector: np.ndarray, limit: int) -> list[tuple[ImageRecord, float]]:
+        if limit <= 0:
+            return []
+
+        vec = vector.astype(np.float32, copy=False)
+        if vec.ndim != 1 or vec.shape[0] != self.vector_dim:
+            raise ValueError(f"Unexpected vector shape: {tuple(vec.shape)}")
+
+        query_blob = vec.tobytes()
+        sql = """
+            SELECT ids.image_id, rec.rel_path, rec.r2_key, rec.content_type, rec.original_filename, rec.size_bytes, v.distance
+            FROM v_images v
+            JOIN image_ids ids ON v.rowid = ids.rowid
+            JOIN image_records rec ON rec.image_id = ids.image_id
+            WHERE knn_search(v.embedding, knn_param(?, ?))
+        """
+        rows = self.conn.execute(sql, (query_blob, int(limit))).fetchall()
+
+        out: list[tuple[ImageRecord, float]] = []
+        for image_id, rel_path, r2_key, content_type, original_filename, size_bytes, distance in rows:
+            rel_path_s = str(rel_path or "")
+            path = (self.base_dir / rel_path_s) if rel_path_s else None
+            record = ImageRecord(
+                id=str(image_id),
+                path=path,
+                content_type=str(content_type),
+                original_filename=(None if original_filename is None else str(original_filename)),
+                size_bytes=int(size_bytes),
+                r2_key=(None if r2_key is None else str(r2_key)),
+            )
+            try:
+                sim = 1.0 - float(distance)
+            except Exception:
+                sim = float(distance)
+            out.append((record, sim))
+
+        out.sort(key=lambda x: x[1], reverse=True)
+        return out
 
     def ids(self) -> list[str]:
         rows = self.conn.execute("SELECT image_id FROM image_ids").fetchall()

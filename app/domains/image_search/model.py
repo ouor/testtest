@@ -12,12 +12,7 @@ import torch
 from PIL import Image
 from transformers import AutoModel, AutoProcessor
 
-from app.domains.image_search.vectordb import (
-    ImageRecord,
-    ImageRecordStore,
-    VectorIndex,
-    VectorliteVectorIndex,
-)
+from app.domains.image_search.vectordb import ImageRecord, ImageRecordStore, VectorliteVectorIndex
 
 IMAGE_SEARCH_KEY = "image_search"
 
@@ -107,7 +102,6 @@ class ClipEmbedder:
 
 @dataclass
 class ImageSearchState:
-    blob_store: BlobStore
     vector_index: VectorliteVectorIndex
     record_store: ImageRecordStore
     embedder: ClipEmbedder
@@ -146,6 +140,8 @@ def create_state_from_env() -> ImageSearchState:
         db_path = app_dir / "image_search.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # NOTE: Even when using R2 for blob storage, we keep a local directory for
+    # legacy DB records (rel_path) and for temporary embedding files.
     files_dir_raw = (os.getenv("IMAGE_SEARCH_FILES_DIR") or "").strip()
     if files_dir_raw:
         blob_dir = Path(files_dir_raw)
@@ -174,13 +170,7 @@ def create_state_from_env() -> ImageSearchState:
         vector_dim=vector_dim,
         max_elements=max_elements,
     )
-    return ImageSearchState(
-        blob_store=TempDirBlobStore(base_dir=blob_dir),
-        vector_index=vector_index,
-        record_store=vector_index,
-        embedder=embedder,
-        lock=asyncio.Lock(),
-    )
+    return ImageSearchState(vector_index=vector_index, record_store=vector_index, embedder=embedder, lock=asyncio.Lock())
 
 
 def enabled_from_env() -> bool:

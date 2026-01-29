@@ -1,170 +1,145 @@
-![pgrok banner](https://user-images.githubusercontent.com/2946214/227126410-3e9dae19-d0c0-4a96-9040-1322e389c8db.png)
+# AI Model Server (FastAPI)
 
-<div align="center">
-  <h3>Poor man's ngrok</h3>
-  <a href="https://sourcegraph.com/github.com/pgrok/pgrok"><img src="https://img.shields.io/badge/view%20on-Sourcegraph-brightgreen.svg?style=for-the-badge&logo=sourcegraph" alt="Sourcegraph"></a>
-</div>
+## Run (image generation only)
 
-## What?
-
-The pgrok is a multi-tenant HTTP/TCP reverse tunnel solution through remote port forwarding from the SSH protocol.
-
-This is intended for small teams that need to expose the local development environment to the public internet, and you need to bring your own domain name and SSO provider.
-
-It gives stable subdomain for every user, and gated by your SSO through OIDC protocol.
-
-Think of this as a bare-bones alternative to the [ngrok's $65/user/month enterprise tier](https://ngrok.com/pricing) (at the time of founding this project, they have since changed pricing). Trying to put this behind a production system will blow up your SLA.
-
-For individuals and production systems, just buy ngrok, it is still my favorite.
-
-## Why?
-
-Stable subdomains and SSO are two things too expensive.
-
-Why not just pick one from the [Awesome Tunneling](https://github.com/anderspitman/awesome-tunneling)? Think broader. Not everyone is a dev who knows about server operations. For people working as community managers, sales, and PMs, booting up something locally could already be a stretch and requiring them to understand how to set up and fix server problems is a waste of team's productivity.
-
-Copy, paste, and run is the best UX for everyone.
-
-## How?
-
-Before you get started, make sure you have the following:
-
-1. A domain name (e.g. `example.com`, this will be used as the example throughout this section).
-1. A server (dedicated server, VPS) with a public IP address (e.g. `111.33.5.14`).
-1. An SSO provider (e.g. Google, JumpCloud, Okta, GitLab, Keycloak) that allows you to create OIDC clients.
-1. A PostgreSQL server (Render, Vercel, Cloud SQL, self-host).
-
-> [!NOTE]
-> 1. All values used in this document are just examples, substitute based on your setup.
-> 1. All examples in this document use HTTP for brevity, you may refer to our example walkthrough of [setting HTTPS with Caddy and Cloudflare](https://github.com/pgrok/pgrok/blob/main/docs/admin/https.md).
-
-### Set up the server (`pgrokd`)
-
-1. Add the following DNS records for your domain name:
-    1. `A` record for `example.com` to `111.33.5.14` (with **DNS only** if using Cloudflare)
-    1. `A` record for `*.example.com` to `111.33.5.14` (with **DNS only** if using Cloudflare)
-1. Set up the server with the [single binary](./docs/admin/single-binary.md), [Docker](./docs/admin/docker.md#standalone-docker-container) or [Docker Compose](./docs/admin/docker.md#docker-compose).
-1. Alter your network security policy (if applicable) to allow inbound requests to port `2222` from `0.0.0.0/0` (anywhere).
-1. [Download and install Caddy 2](https://caddyserver.com/docs/install) on your server, and use the following Caddyfile config:
-    ```caddyfile
-    http://example.com {
-        reverse_proxy * localhost:3320
-    }
-
-    http://*.example.com {
-        reverse_proxy * localhost:3000
-    }
-    ```
-1. Create a new OIDC client in your SSO with the **Redirect URI** to be `http://example.com/-/oidc/callback`.
-
-### Set up the client (`pgrok`)
-
-1. Go to http://example.com, authenticate with your SSO to obtain the token and URL (e.g. `http://unknwon.example.com`).
-1. Download the latest version of the `pgrok`:
-    - For Homebrew:
-        ```sh
-        brew install pgrok
-        ```
-    - For others, download the archive from the [Releases](https://github.com/pgrok/pgrok/releases) page.
-1. Initialize a `pgrok.yml` file with the following command (assuming you want to forward requests to `http://localhost:3000`):
-    ```sh
-    pgrok init --remote-addr example.com:2222 --forward-addr http://localhost:3000 --token {YOUR_TOKEN}
-    ```
-    - By default, the config file is created under the [standard user configuration directory (`XDG_CONFIG_HOME`)](https://github.com/adrg/xdg):
-        - macOS: `~/Library/Application Support/pgrok/pgrok.yml`
-        - Linux: `~/.config/pgrok/pgrok.yml`
-        - Windows: `%LOCALAPPDATA%\pgrok\pgrok.yml`
-    - Use `--config` flag to specify a different path for the config file.
-1. Launch the client by executing the `pgrok` or `pgrok http` command.
-    - By default, `pgrok` expects the `pgrok.yml` is available under the standard user configuration directory, or under the home directory (`~/.pgrok/pgrok.yml`). Use `--config` flag to specify a different path for the config file.
-    - Use the `--debug` flag to turn on debug logging.
-    - Upon successful startup, you should see a log looks like:
-        ```
-        🎉 You're ready to go live at http://unknwon.example.com! remote=example.com:2222
-        ```
-1. Now visit the URL.
-
-As a special case, the first argument of the `pgrok http` can be used to specify forward address, e.g.
-
-```
-pgrok http 8080
+```bash
+conda create -n "default" python=3.10
+conda activate default
+conda install forge:uv
+uv pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-#### Raw TCP tunnels
+Health checks:
+- `GET /healthz`
+- `GET /readyz`
 
-> [!IMPORTANT]
-> You need to alter the server network security policy (if applicable) to allow additional inbound requests to port range 10000-15000 from `0.0.0.0/0` (anywhere).
+Image generation:
 
-Use the `tcp` subcommand to tunnel raw TCP traffic:
-
-```
-pgrok tcp 5432
-```
-
-Upon successful startup, you should see a log looks like:
-
-```
-🎉 You're ready to go live at tcp://example.com:10086! remote=example.com:2222
+```bash
+curl -s http://localhost:8000/v1/images/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"A serene landscape with mountains and a river during sunset.","seed":42}' \
+  --output out.png
 ```
 
-The assigned TCP port on the server side is semi-stable, such that the same port number is used when still available.
+image generation (stores output in R2 and returns the R2 key only):
+```bash
+curl -s http://localhost:8000/v1/r2/images/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"A serene landscape with mountains and a river during sunset.","seed":42}'
 
-#### Override config options
-
-Following config options can be overridden through CLI flags for both `http` and `tcp` subcommands:
-
-- `--remote-addr, -r` -> `remote_addr`
-- `--forward-addr, -f` -> `forward_addr`
-- `--token, -t` -> `token`
-
-#### HTTP dynamic forwards
-
-Typical HTTP reverse tunnel solutions only support forwarding requests to a single address, `pgrok` can be configured to have dynamic forward rules when tunneling HTTP requests.
-
-For example, if your local frontend is running at `http://localhost:3000` but some gRPC endpoints need to talk to the backend directly at `http://localhost:8080`:
-
-```yaml
-dynamic_forwards: |
-  /api http://localhost:8080
-  /hook http://localhost:8080
+// {"key":"images/generated/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.png"}
 ```
 
-Then all requests prefixed with the path `/api` and `/hook` will be forwarded to `http://localhost:8080` and all the rest are forwarded to the `forward_addr` (`http://localhost:3000`).
+### Notes
+- Model loads once at startup (FastAPI lifespan).
+- Inference is serialized with a semaphore (`max_concurrency=1`).
 
-### Vanilla SSH
+Environment variables:
+- `IMAGE_ENABLED` (default: `1`) - set `0` to skip image model loading
 
-Because the standard SSH protocol is used for tunneling, you may well just use the vanilla SSH client.
+## Image search (upload + semantic search)
 
-1. Go to http://example.com, authenticate with your SSO to obtain the token and URL (e.g. `http://unknwon.example.com`).
-1. Launch the client by executing the `ssh -N -R 0::3000 example.com -p 2222` command:
-    1. Enter the token as your password.
-    1. Use the `-v` flag to turn on debug logging.
-    1. Upon successful startup, you should see a log looks like:
-        ```
-        Allocated port 22487 for remote forward to :3000
-        ```
-1. Now visit the URL.
+This feature lets you upload images, keep them in a server-side directory, and search by text using a CLIP-style embedding model.
 
-## Explain it to me
+Notes:
+- Images are identified by a server-generated UUID.
+- The vector index + image metadata are stored in `IMAGE_SEARCH_DB_PATH` (default: `app/image_search.db`).
+- Uploaded image bytes are stored under `IMAGE_SEARCH_FILES_DIR` (default: `app/image_search_files/`).
+- Restart keeps the registry, since both are persisted under `app/`.
+- Image search requires CUDA. If you don't have CUDA, set `IMAGE_SEARCH_ENABLED=0`.
 
-![pgrok network diagram](https://user-images.githubusercontent.com/2946214/229048941-cc12139d-f250-49fa-806d-19c27996ee09.png)
+Embedding model:
+- Hardcoded: `Bingsu/clip-vit-large-patch14-ko` (no `IMAGE_SEARCH_MODEL_NAME` env)
 
-## Contributing
+Environment variables:
+- `IMAGE_SEARCH_ENABLED` (default: `1`) - set `0` to disable image search init
+- `IMAGE_SEARCH_DB_PATH` (default: `app/image_search.db`) - SQLite file path for the vector DB (relative paths are resolved from the project root)
+- `IMAGE_SEARCH_FILES_DIR` (default: `app/image_search_files/`) - directory where uploaded images are stored (relative paths are resolved from the project root)
+- `IMAGE_SEARCH_MAX_ELEMENTS` (default: `50000`) - HNSW capacity for the vectorlite index
+- `IMAGE_SEARCH_MAX_BYTES` (default: `20971520`) - max upload size per image
 
-Please read through our [contributing guide](.github/contributing.md) and [set up your development environment](docs/dev/local_development.md).
+Endpoints (all under `/v1`):
+- `POST /images` (multipart) - upload an image, returns `{id, ...}`
+- `DELETE /images/{id}` - delete by UUID
+- `GET /images` - list all images (UUID + original filename + metadata)
+- `POST /images/search` - text search, returns `[{id, score}]`
+- `GET /images/{id}/file` - download image bytes
 
-## Sponsors
+Example (upload → list → search → download → delete):
 
-<p>
-  <a href="https://www.bytebase.com?ref=unknwon">
-    <img src="https://raw.githubusercontent.com/sqlchat/sqlchat/main/public/bytebase.webp" width=300>
-  </a>
-</p>
+```bash
+# Upload (capture UUID)
+ID=$(curl -s http://localhost:8000/v1/images \
+  -F "file=@test/image01.jpg" | python -c "import sys, json; print(json.load(sys.stdin)['id'])")
 
-## Credits
+# Upload multiple sample images
+for f in test/image0{1..5}.jpg; do
+  echo "Uploading $f"
+  curl -s http://localhost:8000/v1/images -F "file=@$f"
+  echo
+done
 
-The project wouldn't be possible without reading [function61/holepunch-server](https://github.com/function61/holepunch-server), [function61/holepunch-client](https://github.com/function61/holepunch-client), and [TCP/IP Port Forwarding](https://github.com/apache/mina-sshd/blob/master/docs/technical/tcpip-forwarding.md).
+# List
+curl -s http://localhost:8000/v1/images
 
-## License
+# Search
+curl -s http://localhost:8000/v1/images/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"고양이", "limit": 5}'
 
-This project is under the MIT License. See the [LICENSE](LICENSE) file for the full license text.
+# Download
+curl -s http://localhost:8000/v1/images/$ID/file --output downloaded.bin
+
+# Delete
+curl -s -X DELETE http://localhost:8000/v1/images/$ID
+```
+
+## Voice generation (optional)
+
+Enable voice model loading at startup:
+
+```bash
+export VOICE_ENABLED=1
+```
+
+Generate voice (multipart form upload):
+
+```bash
+curl -s http://localhost:8000/v1/voice/generate \
+  -F "ref_audio=@test/ref.mp3" \
+  -F "ref_text=아이.. 그게 참.. 난 정말 진심으로 말하고 있는거거든.. 요! 근데 그 쪽에서 자꾸 안 믿어주니까!" \
+  -F "text=오전 10시 30분에 예정된 미팅 일정을 다시 한번 확인해 주시겠어요?" \
+  -F "language=Korean" \
+  --output out.mp3
+```
+
+R2 voice generation (ref_audio provided as an R2 key; returns output R2 key only):
+
+```bash
+curl -s http://localhost:8000/v1/r2/voice/generate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "ref_audio_key": "voice/refs/ref.mp3",
+    "ref_text": "아이.. 그게 참.. 난 정말 진심으로 말하고 있는거거든.. 요! 근데 그 쪽에서 자꾸 안 믿어주니까!",
+    "text": "오전 10시 30분에 예정된 미팅 일정을 다시 한번 확인해 주시겠어요?",
+    "language": "Korean"
+  }'
+```
+
+Notes:
+- Endpoint returns `audio/mpeg` bytes (mp3).
+- MP3 encoding uses `torchaudio`; depending on your environment, an ffmpeg-backed build may be required.
+
+## Cloudflare R2 (optional)
+
+The server includes a small S3-compatible utility for Cloudflare R2 in [testtest/app/core/storage/r2.py](testtest/app/core/storage/r2.py).
+
+Environment variables:
+- `R2_ENABLED` (default: `0`) - set `1` to enable R2 client initialization
+- `R2_ACCOUNT_ID` (required unless `R2_ENDPOINT_URL` is provided)
+- `R2_ENDPOINT_URL` (optional) - override endpoint URL (otherwise derived from `R2_ACCOUNT_ID`)
+- `R2_ACCESS_KEY_ID` (required)
+- `R2_SECRET_ACCESS_KEY` (required)
+- `R2_BUCKET_NAME` (required)

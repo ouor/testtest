@@ -40,15 +40,14 @@ def create_app() -> FastAPI:
     @app.get("/readyz")
     async def readyz():
         models = getattr(app.state, "models", None)
-        model_status = {
-            "zimage_turbo": bool(models and models.get("zimage_turbo")),
-            "qwen3_tts": bool(models and models.get("qwen3_tts")),
-        }
+        zimage_turbo_ready = bool(models and models.get("zimage_turbo"))
+        qwen3_tts_ready = bool(models and models.get("qwen3_tts"))
         image_search_ready = bool(getattr(app.state, "image_search", None))
         return {
-            "ready": any(model_status.values()) or image_search_ready,
-            "models": model_status,
-            "image_search": image_search_ready,
+            "server_ready": zimage_turbo_ready or qwen3_tts_ready or image_search_ready,
+            "zimage_turbo_ready": zimage_turbo_ready,
+            "qwen3_tts_ready": qwen3_tts_ready,
+            "image_search_ready": image_search_ready,
         }
 
     return app

@@ -149,10 +149,7 @@ curl -s http://localhost:8000/v1/r2/images/generate \
 * CLIP 임베딩 및 벡터 인덱스:
 
   * SQLite (`IMAGE_SEARCH_DB_PATH`)에 영구 저장
-* `IMAGE_SEARCH_FILES_DIR`:
-
-  * 임베딩 처리 중 임시 파일
-  * 레거시 로컬 이미지 레코드 용도
+* 임베딩 처리 중 임시 파일은 OS 임시 디렉터리를 사용합니다.
 
 ---
 
@@ -162,7 +159,6 @@ curl -s http://localhost:8000/v1/r2/images/generate \
 | ------------------------- | ----------------------- | ---------- |
 | IMAGE_SEARCH_ENABLED      | 1                       | 이미지 검색 활성화 |
 | IMAGE_SEARCH_DB_PATH      | app/image_search.db     | 벡터 DB      |
-| IMAGE_SEARCH_FILES_DIR    | app/image_search_files/ | 임시/레거시 파일  |
 | IMAGE_SEARCH_MAX_ELEMENTS | 50000                   | HNSW 용량    |
 | IMAGE_SEARCH_MAX_BYTES    | 20971520                | 최대 업로드 크기  |
 

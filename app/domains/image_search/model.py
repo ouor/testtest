@@ -5,14 +5,13 @@ import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 import numpy as np
 import torch
 from PIL import Image
 from transformers import AutoModel, AutoProcessor
 
-from app.domains.image_search.vectordb import ImageRecord, ImageRecordStore, VectorliteVectorIndex
+from app.domains.image_search.vectordb import ImageRecordStore, VectorliteVectorIndex
 
 IMAGE_SEARCH_KEY = "image_search"
 
@@ -29,29 +28,6 @@ def _safe_suffix(filename: str | None) -> str:
     if not suffix or len(suffix) > 16:
         return ".bin"
     return suffix
-
-
-class BlobStore(Protocol):
-    def save(self, *, image_id: str, data: bytes, suffix: str) -> Path: ...
-
-    def delete(self, *, path: Path) -> None: ...
-
-
-class TempDirBlobStore:
-    def __init__(self, base_dir: Path) -> None:
-        self._base_dir = base_dir
-
-    def save(self, *, image_id: str, data: bytes, suffix: str) -> Path:
-        path = self._base_dir / f"{image_id}{suffix}"
-        path.write_bytes(data)
-        return path
-
-    def delete(self, *, path: Path) -> None:
-        try:
-            path.unlink(missing_ok=True)
-        except Exception:
-            # Best-effort
-            pass
 
 
 class ClipEmbedder:
@@ -132,10 +108,6 @@ def create_state_from_env() -> ImageSearchState:
 
     db_path = resolve_db_path_from_env(project_root=project_root)
 
-    # NOTE: Even when using R2 for blob storage, we keep a local directory for
-    # legacy DB records (rel_path) and for temporary embedding files.
-    blob_dir = resolve_files_dir_from_env(project_root=project_root)
-
     embedder = ClipEmbedder.load_from_env()
 
     max_elements_raw = (os.getenv("IMAGE_SEARCH_MAX_ELEMENTS") or "50000").strip()
@@ -151,7 +123,6 @@ def create_state_from_env() -> ImageSearchState:
 
     vector_index = VectorliteVectorIndex(
         db_path=db_path,
-        base_dir=blob_dir,
         vector_dim=vector_dim,
         max_elements=max_elements,
     )
@@ -182,17 +153,3 @@ def resolve_db_path_from_env(*, project_root: Path | None = None) -> Path:
     return db_path
 
 
-def resolve_files_dir_from_env(*, project_root: Path | None = None) -> Path:
-    project_root = project_root or resolve_project_root()
-    app_dir = project_root / "app"
-
-    files_dir_raw = (os.getenv("IMAGE_SEARCH_FILES_DIR") or "").strip()
-    if files_dir_raw:
-        blob_dir = Path(files_dir_raw)
-        if not blob_dir.is_absolute():
-            blob_dir = project_root / blob_dir
-    else:
-        blob_dir = app_dir / "image_search_files"
-
-    blob_dir.mkdir(parents=True, exist_ok=True)
-    return blob_dir

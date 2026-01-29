@@ -13,7 +13,7 @@ class UploadImageResponse(BaseModel):
 
 class ImageInfo(BaseModel):
     id: str
-    r2_key: str | None = None
+    r2_key: str
     original_filename: str | None = None
     content_type: str
     size_bytes: int
@@ -30,7 +30,7 @@ class SearchImagesRequest(BaseModel):
 
 class SearchResult(BaseModel):
     id: str
-    r2_key: str | None = None
+    r2_key: str
     score: float
     original_filename: str | None = None
     content_type: str

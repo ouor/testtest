@@ -10,7 +10,8 @@ import torch
 from fastapi import Request, UploadFile
 
 from app.core.errors.exceptions import AppError, InferenceError, ModelLoadError, OutOfMemoryError
-from app.domains.image_search.model import IMAGE_SEARCH_KEY, ImageRecord, _safe_suffix
+from app.domains.image_search.model import IMAGE_SEARCH_KEY, _safe_suffix
+from app.domains.image_search.vectordb import ImageRecord
 from app.domains.image_search.schemas import SearchImagesRequest
 
 
@@ -26,6 +27,14 @@ def _get_r2(request: Request):
     if r2 is None:
         raise AppError(code="R2_NOT_ENABLED", message="Cloudflare R2 is not enabled", http_status=500)
     return r2
+
+
+async def _best_effort_r2_delete(*, r2: object, key: str, reason: str) -> None:
+    try:
+        await anyio.to_thread.run_sync(partial(getattr(r2, "delete"), key=key))
+    except Exception as exc:
+        # Best-effort cleanup; log for observability.
+        print(f"WARNING: failed to delete R2 object: key={key} reason={reason} error={exc!r}")
 
 
 async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
@@ -76,17 +85,10 @@ async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
                 async with limit.semaphore:
                     vec = await anyio.to_thread.run_sync(state.embedder.embed_image_path, str(tmp_path))
         except torch.cuda.OutOfMemoryError as exc:
-            # Best-effort cleanup of uploaded blob.
-            try:
-                await anyio.to_thread.run_sync(partial(r2.delete, key=r2_key))
-            except Exception:
-                pass
+            await _best_effort_r2_delete(r2=r2, key=r2_key, reason="embedding_oom")
             raise OutOfMemoryError(detail=str(exc)) from exc
         except Exception as exc:
-            try:
-                await anyio.to_thread.run_sync(partial(r2.delete, key=r2_key))
-            except Exception:
-                pass
+            await _best_effort_r2_delete(r2=r2, key=r2_key, reason="embedding_error")
             raise InferenceError(detail=str(exc)) from exc
     finally:
         try:
@@ -96,7 +98,6 @@ async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
 
     record = ImageRecord(
         id=image_id,
-        path=None,
         content_type=file.content_type,
         original_filename=file.filename,
         size_bytes=len(raw),
@@ -108,10 +109,7 @@ async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
             state.vector_index.upsert_image(record=record, vector=vec)
     except Exception as exc:
         # If DB write fails, attempt to delete the blob.
-        try:
-            await anyio.to_thread.run_sync(partial(r2.delete, key=r2_key))
-        except Exception:
-            pass
+        await _best_effort_r2_delete(r2=r2, key=r2_key, reason="db_write_failed")
         raise InferenceError(detail=str(exc)) from exc
 
     return record
@@ -119,6 +117,7 @@ async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
 
 async def delete_image(request: Request, *, image_id: str) -> None:
     state = _get_state(request)
+    r2 = _get_r2(request)
     async with state.lock:
         record = state.record_store.get_record(image_id=image_id)
         if record is not None:
@@ -127,15 +126,18 @@ async def delete_image(request: Request, *, image_id: str) -> None:
     if record is None:
         raise AppError(code="NOT_FOUND", message="Image not found", http_status=404)
 
-    if record.r2_key:
-        r2 = _get_r2(request)
-        await anyio.to_thread.run_sync(partial(r2.delete, key=record.r2_key))
-    elif record.path is not None:
-        # Backward-compatible cleanup for legacy local records.
-        try:
-            await anyio.to_thread.run_sync(partial(record.path.unlink, missing_ok=True))
-        except Exception:
-            pass
+    if not record.r2_key:
+        raise AppError(code="R2_KEY_MISSING", message="Image record is missing r2_key", http_status=500)
+
+    try:
+        await anyio.to_thread.run_sync(partial(getattr(r2, "delete"), key=record.r2_key))
+    except Exception as exc:
+        raise AppError(
+            code="R2_DELETE_FAILED",
+            message="Failed to delete image blob from R2",
+            http_status=502,
+            detail={"key": record.r2_key, "error": repr(exc)},
+        ) from exc
 
 
 async def list_images(request: Request) -> list[ImageRecord]:
@@ -186,10 +188,8 @@ async def get_image_record(request: Request, *, image_id: str) -> ImageRecord:
         if record is None:
             raise AppError(code="NOT_FOUND", message="Image not found", http_status=404)
 
-        # Backward-compatible self-heal for legacy local records.
-        if record.r2_key is None and record.path is not None and not record.path.exists():
-            state.vector_index.delete_image(image_id=image_id)
-            raise AppError(code="NOT_FOUND", message="Image not found", http_status=404)
+        if not record.r2_key:
+            raise AppError(code="R2_KEY_MISSING", message="Image record is missing r2_key", http_status=500)
 
         return record
 

@@ -17,6 +17,7 @@ fastapi
 python-multipart
 uvicorn[standard]
 pillow
+gradio
 
 # Vector DB
 vectorlite-py

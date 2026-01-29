@@ -128,28 +128,13 @@ class ImageSearchState:
 
 
 def create_state_from_env() -> ImageSearchState:
-    project_root = Path(__file__).resolve().parents[3]
-    app_dir = project_root / "app"
+    project_root = resolve_project_root()
 
-    db_path_raw = (os.getenv("IMAGE_SEARCH_DB_PATH") or "").strip()
-    if db_path_raw:
-        db_path = Path(db_path_raw)
-        if not db_path.is_absolute():
-            db_path = project_root / db_path
-    else:
-        db_path = app_dir / "image_search.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path = resolve_db_path_from_env(project_root=project_root)
 
     # NOTE: Even when using R2 for blob storage, we keep a local directory for
     # legacy DB records (rel_path) and for temporary embedding files.
-    files_dir_raw = (os.getenv("IMAGE_SEARCH_FILES_DIR") or "").strip()
-    if files_dir_raw:
-        blob_dir = Path(files_dir_raw)
-        if not blob_dir.is_absolute():
-            blob_dir = project_root / blob_dir
-    else:
-        blob_dir = app_dir / "image_search_files"
-    blob_dir.mkdir(parents=True, exist_ok=True)
+    blob_dir = resolve_files_dir_from_env(project_root=project_root)
 
     embedder = ClipEmbedder.load_from_env()
 
@@ -175,3 +160,39 @@ def create_state_from_env() -> ImageSearchState:
 
 def enabled_from_env() -> bool:
     return _env_truthy("IMAGE_SEARCH_ENABLED", "1")
+
+
+def resolve_project_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def resolve_db_path_from_env(*, project_root: Path | None = None) -> Path:
+    project_root = project_root or resolve_project_root()
+    app_dir = project_root / "app"
+
+    db_path_raw = (os.getenv("IMAGE_SEARCH_DB_PATH") or "").strip()
+    if db_path_raw:
+        db_path = Path(db_path_raw)
+        if not db_path.is_absolute():
+            db_path = project_root / db_path
+    else:
+        db_path = app_dir / "image_search.db"
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return db_path
+
+
+def resolve_files_dir_from_env(*, project_root: Path | None = None) -> Path:
+    project_root = project_root or resolve_project_root()
+    app_dir = project_root / "app"
+
+    files_dir_raw = (os.getenv("IMAGE_SEARCH_FILES_DIR") or "").strip()
+    if files_dir_raw:
+        blob_dir = Path(files_dir_raw)
+        if not blob_dir.is_absolute():
+            blob_dir = project_root / blob_dir
+    else:
+        blob_dir = app_dir / "image_search_files"
+
+    blob_dir.mkdir(parents=True, exist_ok=True)
+    return blob_dir

@@ -79,6 +79,11 @@ class VectorliteVectorIndex:
 
         self._init_schema()
 
+        # Some SQLite virtual table extensions may keep index data outside the main DB file.
+        # To make R2 snapshots robust, we persist embeddings in a normal table and can
+        # rebuild the virtual index if it appears empty.
+        self._ensure_vector_index_materialized()
+
     def _init_schema(self) -> None:
         self.conn.execute("CREATE TABLE IF NOT EXISTS image_ids (image_id TEXT UNIQUE)")
 
@@ -95,11 +100,25 @@ class VectorliteVectorIndex:
             """
         )
 
+        # Persist embeddings in a normal table so backups capture vectors reliably.
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS image_vectors (
+                image_id TEXT PRIMARY KEY,
+                embedding BLOB NOT NULL
+            )
+            """
+        )
+
         # Lightweight migration: older DBs won't have r2_key.
         cols = [r[1] for r in self.conn.execute("PRAGMA table_info(image_records)").fetchall()]
         if "r2_key" not in cols:
             self.conn.execute("ALTER TABLE image_records ADD COLUMN r2_key TEXT")
 
+        self._create_virtual_table_if_missing()
+        self.conn.commit()
+
+    def _create_virtual_table_if_missing(self) -> None:
         self.conn.execute(
             f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS v_images USING vectorlite(
@@ -108,7 +127,53 @@ class VectorliteVectorIndex:
             )
             """
         )
-        self.conn.commit()
+
+    def _recreate_virtual_table(self) -> None:
+        # Some vectorlite builds don't support bulk DELETEs; safest is drop+recreate.
+        self.conn.execute("DROP TABLE IF EXISTS v_images")
+        self._create_virtual_table_if_missing()
+
+    def _vector_count(self) -> int:
+        try:
+            row = self.conn.execute("SELECT COUNT(*) FROM image_vectors").fetchone()
+            return int(row[0] if row else 0)
+        except Exception:
+            return 0
+
+    def _index_count(self) -> int:
+        try:
+            row = self.conn.execute("SELECT COUNT(*) FROM v_images").fetchone()
+            return int(row[0] if row else 0)
+        except Exception:
+            return 0
+
+    def _ensure_vector_index_materialized(self) -> None:
+        # If we have persisted vectors but the virtual index is empty (common after restore
+        # if the extension stores data out-of-band), rebuild it.
+        vec_count = self._vector_count()
+        if vec_count <= 0:
+            return
+
+        idx_count = self._index_count()
+        if idx_count > 0:
+            return
+
+        self.rebuild_vector_index_from_vectors()
+
+    def rebuild_vector_index_from_vectors(self) -> None:
+        rows = self.conn.execute("SELECT image_id, embedding FROM image_vectors").fetchall()
+        if not rows:
+            return
+
+        with self.conn:
+            # Clear existing index + mapping.
+            self._recreate_virtual_table()
+            self.conn.execute("DELETE FROM image_ids")
+
+            for image_id, embedding_blob in rows:
+                image_id_s = str(image_id)
+                rowid = self._ensure_rowid(image_id_s)
+                self.conn.execute("INSERT INTO v_images(rowid, embedding) VALUES (?, ?)", (rowid, embedding_blob))
 
     def _rowid_for_image_id(self, image_id: str) -> int | None:
         row = self.conn.execute("SELECT rowid FROM image_ids WHERE image_id = ?", (image_id,)).fetchone()
@@ -138,6 +203,13 @@ class VectorliteVectorIndex:
             self.conn.execute("INSERT INTO v_images(rowid, embedding) VALUES (?, ?)", (rowid, blob))
             self.conn.execute(
                 """
+                INSERT INTO image_vectors(image_id, embedding) VALUES (?, ?)
+                ON CONFLICT(image_id) DO UPDATE SET embedding=excluded.embedding
+                """,
+                (record.id, blob),
+            )
+            self.conn.execute(
+                """
                 INSERT INTO image_records(image_id, rel_path, r2_key, content_type, original_filename, size_bytes)
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(image_id) DO UPDATE SET
@@ -164,6 +236,7 @@ class VectorliteVectorIndex:
             if rowid is not None:
                 self.conn.execute("DELETE FROM v_images WHERE rowid = ?", (rowid,))
                 self.conn.execute("DELETE FROM image_ids WHERE rowid = ?", (rowid,))
+            self.conn.execute("DELETE FROM image_vectors WHERE image_id = ?", (image_id,))
             self.conn.execute("DELETE FROM image_records WHERE image_id = ?", (image_id,))
 
     def upsert(self, *, item_id: str, vector: np.ndarray) -> None:
@@ -177,6 +250,13 @@ class VectorliteVectorIndex:
         with self.conn:
             self.conn.execute("DELETE FROM v_images WHERE rowid = ?", (rowid,))
             self.conn.execute("INSERT INTO v_images(rowid, embedding) VALUES (?, ?)", (rowid, blob))
+            self.conn.execute(
+                """
+                INSERT INTO image_vectors(image_id, embedding) VALUES (?, ?)
+                ON CONFLICT(image_id) DO UPDATE SET embedding=excluded.embedding
+                """,
+                (item_id, blob),
+            )
 
     def delete(self, *, item_id: str) -> None:
         rowid = self._rowid_for_image_id(item_id)
@@ -185,6 +265,7 @@ class VectorliteVectorIndex:
         with self.conn:
             self.conn.execute("DELETE FROM v_images WHERE rowid = ?", (rowid,))
             self.conn.execute("DELETE FROM image_ids WHERE rowid = ?", (rowid,))
+            self.conn.execute("DELETE FROM image_vectors WHERE image_id = ?", (item_id,))
 
     def upsert_record(self, record: ImageRecord) -> None:
         rel_path = os.fspath(Path(record.path).name) if record.path is not None else ""
@@ -329,3 +410,22 @@ class VectorliteVectorIndex:
             self.conn.close()
         except Exception:
             pass
+
+    def backup_to_path(self, *, dest_path: Path) -> None:
+        """Write a consistent SQLite snapshot to dest_path."""
+        # Ensure pending transactions are flushed.
+        try:
+            self.conn.commit()
+        except Exception:
+            pass
+
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_conn = sqlite3.connect(str(dest_path), check_same_thread=False)
+        try:
+            with dest_conn:
+                self.conn.backup(dest_conn)
+        finally:
+            try:
+                dest_conn.close()
+            except Exception:
+                pass

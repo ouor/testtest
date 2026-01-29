@@ -61,6 +61,10 @@ curl http://localhost:8000/readyz | python -m json.tool
 
 ## 4. 공통 설정 (Environment Variables)
 
+- `IMAGE_SEARCH_DB_R2_KEY` (default: `image_search.db`) - R2 key used for DB restore/backup snapshots
+- `IMAGE_SEARCH_DB_BACKUP_ENABLED` (default: `1`) - set `0` to disable DB backup/restore via R2
+- `IMAGE_SEARCH_DB_BACKUP_INTERVAL_SECONDS` (default: `1800`) - periodic DB backup interval
+
 ### 기능 토글
 
 | 기능     | 변수                   | 기본값 |
@@ -347,8 +351,6 @@ export R2_BUCKET_NAME=xxxx
 
 ### 구현 위치
 
-* `app/core/storage/r2.py`
-
 ```
-
----
+* `app/core/storage/r2.py`
+```

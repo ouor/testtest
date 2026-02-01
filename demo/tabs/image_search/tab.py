@@ -17,6 +17,7 @@ def build_image_search_tab(*, base_url: gr.Textbox, timeout: gr.Number) -> None:
     left, right = two_column(left_title="Demo", right_title="Example code")
 
     with left:
+        project_id = gr.Textbox(label="project_id", value="default")
         op = gr.Dropdown(
             label="Operation",
             choices=[
@@ -64,32 +65,46 @@ def build_image_search_tab(*, base_url: gr.Textbox, timeout: gr.Number) -> None:
         init_examples = generate_all(
             ExampleRequest(
                 method="POST",
-                url=join_api(base_url.value or "http://localhost:8000", "/v1/images"),
+                url=join_api(base_url.value or "http://localhost:8000", "/v1/projects/default/images"),
                 multipart={"file": {"type": "file", "path": "path/to/image.jpg"}},
             )
         )
         panel = CodePanel().build(initial=init_examples)
 
-    def _example(api_base_url: str, operation: str, q: str, lim: float, image_id_get_val: str, image_id_del_val: str):
+    def _example(
+        api_base_url: str,
+        pid: str,
+        operation: str,
+        q: str,
+        lim: float,
+        image_id_get_val: str,
+        image_id_del_val: str,
+    ):
         image_id = image_id_get_val if operation == "Get Image File (redirect)" else image_id_del_val
         if operation == "Upload Image":
             req = ExampleRequest(
                 method="POST",
-                url=join_api(api_base_url, "/v1/images"),
+                url=join_api(api_base_url, f"/v1/projects/{pid or 'default'}/images"),
                 multipart={"file": {"type": "file", "path": "path/to/image.jpg"}},
             )
         elif operation == "List Images":
-            req = ExampleRequest(method="GET", url=join_api(api_base_url, "/v1/images"))
+            req = ExampleRequest(method="GET", url=join_api(api_base_url, f"/v1/projects/{pid or 'default'}/images"))
         elif operation == "Search Images":
             req = ExampleRequest(
                 method="POST",
-                url=join_api(api_base_url, "/v1/images/search"),
+                url=join_api(api_base_url, f"/v1/projects/{pid or 'default'}/images/search"),
                 json_body={"query": q, "limit": int(lim) if lim is not None else 5},
             )
         elif operation == "Get Image File (redirect)":
-            req = ExampleRequest(method="GET", url=join_api(api_base_url, f"/v1/images/{image_id or '<id>'}/file"))
+            req = ExampleRequest(
+                method="GET",
+                url=join_api(api_base_url, f"/v1/projects/{pid or 'default'}/images/{image_id or '<id>'}/file"),
+            )
         else:  # Delete
-            req = ExampleRequest(method="DELETE", url=join_api(api_base_url, f"/v1/images/{image_id or '<id>'}"))
+            req = ExampleRequest(
+                method="DELETE",
+                url=join_api(api_base_url, f"/v1/projects/{pid or 'default'}/images/{image_id or '<id>'}"),
+            )
 
         ex = generate_all(req)
         return CodePanel.update_all(ex["curl"], ex["python"], ex["java"], ex["javascript"])
@@ -103,26 +118,32 @@ def build_image_search_tab(*, base_url: gr.Textbox, timeout: gr.Number) -> None:
             gr.update(visible=operation == "Delete Image"),
         )
 
-    def _upload(api_base_url: str, timeout_seconds: float, fpath: str | None):
+    def _upload(api_base_url: str, timeout_seconds: float, pid: str, fpath: str | None):
         client = HttpClient(timeout_seconds=float(timeout_seconds))
         if not fpath:
             return {"error": "file is required"}, "Error"
-        res = upload_image(client=client, base_url=api_base_url, image_path=fpath)
+        res = upload_image(client=client, base_url=api_base_url, project_id=pid or "default", image_path=fpath)
         return safe_json_or_text(res.body_bytes), f"HTTP {res.status_code}"
 
-    def _list(api_base_url: str, timeout_seconds: float):
+    def _list(api_base_url: str, timeout_seconds: float, pid: str):
         client = HttpClient(timeout_seconds=float(timeout_seconds))
-        res = list_images(client=client, base_url=api_base_url)
+        res = list_images(client=client, base_url=api_base_url, project_id=pid or "default")
         return safe_json_or_text(res.body_bytes), f"HTTP {res.status_code}"
 
-    def _search(api_base_url: str, timeout_seconds: float, q: str, lim: float):
+    def _search(api_base_url: str, timeout_seconds: float, pid: str, q: str, lim: float):
         client = HttpClient(timeout_seconds=float(timeout_seconds))
-        res = search_images(client=client, base_url=api_base_url, payload={"query": q, "limit": int(lim)})
+        res = search_images(client=client, base_url=api_base_url, project_id=pid or "default", payload={"query": q, "limit": int(lim)})
         return safe_json_or_text(res.body_bytes), f"HTTP {res.status_code}"
 
-    def _get(api_base_url: str, timeout_seconds: float, image_id: str, follow_redirect: bool):
+    def _get(api_base_url: str, timeout_seconds: float, pid: str, image_id: str, follow_redirect: bool):
         client = HttpClient(timeout_seconds=float(timeout_seconds))
-        res = get_image_file_redirect(client=client, base_url=api_base_url, image_id=image_id, follow=follow_redirect)
+        res = get_image_file_redirect(
+            client=client,
+            base_url=api_base_url,
+            project_id=pid or "default",
+            image_id=image_id,
+            follow=follow_redirect,
+        )
         if not follow_redirect:
             return safe_json_or_text(res.body_bytes), res.headers.get("location") or "", None, f"HTTP {res.status_code}"
 
@@ -142,26 +163,30 @@ def build_image_search_tab(*, base_url: gr.Textbox, timeout: gr.Number) -> None:
         img_path = write_temp_bytes(res.body_bytes, suffix=suffix)
         return {"downloaded": True, "content_type": res.headers.get("content-type")}, "", img_path, "OK"
 
-    def _delete(api_base_url: str, timeout_seconds: float, image_id: str):
+    def _delete(api_base_url: str, timeout_seconds: float, pid: str, image_id: str):
         client = HttpClient(timeout_seconds=float(timeout_seconds))
-        res = delete_image(client=client, base_url=api_base_url, image_id=image_id)
+        res = delete_image(client=client, base_url=api_base_url, project_id=pid or "default", image_id=image_id)
         if res.status_code == 204:
             return {"deleted": True}, "OK"
         return safe_json_or_text(res.body_bytes), f"HTTP {res.status_code}"
 
     op.change(_op_change, inputs=[op], outputs=[upload_group, list_group, search_group, get_group, delete_group])
 
-    for comp in [base_url, op, query, limit, image_id_get, image_id_del]:
+    for comp in [base_url, project_id, op, query, limit, image_id_get, image_id_del]:
         comp.change(
             _example,
-            inputs=[base_url, op, query, limit, image_id_get, image_id_del],
+            inputs=[base_url, project_id, op, query, limit, image_id_get, image_id_del],
             outputs=panel.outputs(),
         )
 
-    upload_btn.click(_upload, inputs=[base_url, timeout, upload_file], outputs=[out, status])
-    list_btn.click(_list, inputs=[base_url, timeout], outputs=[out, status])
-    search_btn.click(_search, inputs=[base_url, timeout, query, limit], outputs=[out, status])
-    get_btn.click(_get, inputs=[base_url, timeout, image_id_get, follow], outputs=[out, redirect_url, downloaded_image, status])
-    del_btn.click(_delete, inputs=[base_url, timeout, image_id_del], outputs=[out, status])
+    upload_btn.click(_upload, inputs=[base_url, timeout, project_id, upload_file], outputs=[out, status])
+    list_btn.click(_list, inputs=[base_url, timeout, project_id], outputs=[out, status])
+    search_btn.click(_search, inputs=[base_url, timeout, project_id, query, limit], outputs=[out, status])
+    get_btn.click(
+        _get,
+        inputs=[base_url, timeout, project_id, image_id_get, follow],
+        outputs=[out, redirect_url, downloaded_image, status],
+    )
+    del_btn.click(_delete, inputs=[base_url, timeout, project_id, image_id_del], outputs=[out, status])
 
     

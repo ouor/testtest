@@ -173,8 +173,13 @@ curl -s http://localhost:8000/v1/r2/images/generate \
 
 * 이미지 업로드 시:
 
-  * 원본 바이트 → **R2 저장**
+  * 원본 바이트 → **R2 저장** (프로젝트별 prefix)
   * 서버는 UUID + `r2_key`만 관리
+
+* 프로젝트 생성:
+
+  * 별도 “프로젝트 생성 API”는 없으며, **해당 project_id로 첫 업로드 시 자동 생성**됩니다.
+  * 업로드 전에 존재하지 않는 project_id로 `list/search/get/delete` 호출 시 `404 PROJECT_NOT_FOUND`가 반환됩니다.
 * CLIP 임베딩 및 벡터 인덱스:
 
   * SQLite (`IMAGE_SEARCH_DB_PATH`)에 영구 저장
@@ -190,6 +195,7 @@ curl -s http://localhost:8000/v1/r2/images/generate \
 | IMAGE_SEARCH_DB_PATH      | app/image_search.db     | 벡터 DB      |
 | IMAGE_SEARCH_MAX_ELEMENTS | 50000                   | HNSW 용량    |
 | IMAGE_SEARCH_MAX_BYTES    | 20971520                | 최대 업로드 크기  |
+| IMAGE_SEARCH_REMOTE_PREFIX | AI/SEARCH/              | 업로드 이미지 R2 key prefix |
 
 ---
 
@@ -198,13 +204,14 @@ curl -s http://localhost:8000/v1/r2/images/generate \
 **Endpoint**
 
 ```
-POST /v1/images
+POST /v1/projects/{project_id}/images
 ```
 
 **Example**
 
 ```bash
-curl -s http://localhost:8000/v1/images \
+PROJECT_ID=default
+curl -s http://localhost:8000/v1/projects/$PROJECT_ID/images \
   -F "file=@test/image01.jpg" | python -m json.tool
 ```
 
@@ -215,13 +222,14 @@ curl -s http://localhost:8000/v1/images \
 **Endpoint**
 
 ```
-GET /v1/images
+GET /v1/projects/{project_id}/images
 ```
 
 **Example**
 
 ```bash
-curl -s http://localhost:8000/v1/images | python -m json.tool
+PROJECT_ID=default
+curl -s http://localhost:8000/v1/projects/$PROJECT_ID/images | python -m json.tool
 ```
 
 ---
@@ -231,13 +239,14 @@ curl -s http://localhost:8000/v1/images | python -m json.tool
 **Endpoint**
 
 ```
-POST /v1/images/search
+POST /v1/projects/{project_id}/images/search
 ```
 
 **Example**
 
 ```bash
-curl -s http://localhost:8000/v1/images/search \
+PROJECT_ID=default
+curl -s http://localhost:8000/v1/projects/$PROJECT_ID/images/search \
   -H 'Content-Type: application/json' \
   -d '{
     "query": "고양이",
@@ -252,20 +261,22 @@ curl -s http://localhost:8000/v1/images/search \
 **Endpoint**
 
 ```
-GET /v1/images/{id}/file
+GET /v1/projects/{project_id}/images/{id}/file
 ```
 
 **Example (redirect 확인)**
 
 ```bash
-curl -s -D - http://localhost:8000/v1/images/$ID/file
+PROJECT_ID=default
+curl -s -D - http://localhost:8000/v1/projects/$PROJECT_ID/images/$ID/file
 ```
 
 **Example (실제 다운로드)**
 
 ```bash
+PROJECT_ID=default
 curl -L -s \
-  http://localhost:8000/v1/images/$ID/file \
+  http://localhost:8000/v1/projects/$PROJECT_ID/images/$ID/file \
   --output out.jpg
 ```
 
@@ -276,13 +287,14 @@ curl -L -s \
 **Endpoint**
 
 ```
-DELETE /v1/images/{id}
+DELETE /v1/projects/{project_id}/images/{id}
 ```
 
 **Example**
 
 ```bash
-curl -s -X DELETE http://localhost:8000/v1/images/{id}
+PROJECT_ID=default
+curl -s -X DELETE http://localhost:8000/v1/projects/$PROJECT_ID/images/{id}
 ```
 
 ---

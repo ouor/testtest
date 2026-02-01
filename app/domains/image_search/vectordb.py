@@ -18,6 +18,7 @@ def _normalize(vec: np.ndarray) -> np.ndarray:
 
 @dataclass(frozen=True)
 class ImageRecord:
+    project_id: str
     id: str
     r2_key: str
     content_type: str
@@ -38,11 +39,15 @@ class VectorIndex(Protocol):
 class ImageRecordStore(Protocol):
     def upsert_record(self, record: ImageRecord) -> None: ...
 
-    def get_record(self, *, image_id: str) -> ImageRecord | None: ...
+    def ensure_project(self, *, project_id: str) -> None: ...
 
-    def delete_record(self, *, image_id: str) -> None: ...
+    def project_exists(self, *, project_id: str) -> bool: ...
 
-    def list_records(self) -> list[ImageRecord]: ...
+    def get_record(self, *, project_id: str, image_id: str) -> ImageRecord | None: ...
+
+    def delete_record(self, *, project_id: str, image_id: str) -> None: ...
+
+    def list_records(self, *, project_id: str) -> list[ImageRecord]: ...
 
 
 class VectorliteVectorIndex:
@@ -56,7 +61,7 @@ class VectorliteVectorIndex:
     Additionally stores image metadata in `image_records` for list/get/delete.
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 4
 
     def __init__(self, *, db_path: Path, vector_dim: int, max_elements: int) -> None:
         self.db_path = db_path
@@ -97,18 +102,40 @@ class VectorliteVectorIndex:
         if current_version != self.SCHEMA_VERSION:
             # Hard reset on incompatibility (we're intentionally dropping legacy support).
             self.conn.execute("DROP TABLE IF EXISTS v_images")
+            self.conn.execute("DROP TABLE IF EXISTS projects")
             self.conn.execute("DROP TABLE IF EXISTS image_ids")
             self.conn.execute("DROP TABLE IF EXISTS image_vectors")
             self.conn.execute("DROP TABLE IF EXISTS image_records")
             self.conn.execute("DELETE FROM schema_version WHERE id = 1")
             self.conn.execute("INSERT INTO schema_version(id, version) VALUES (1, ?)", (self.SCHEMA_VERSION,))
 
-        self.conn.execute("CREATE TABLE IF NOT EXISTS image_ids (image_id TEXT UNIQUE)")
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS projects (
+                project_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+            )
+            """
+        )
+
+        # NOTE: We use a surrogate integer primary key as the stable rowid for v_images.
+        # This allows (project_id, image_id) to be unique while keeping an integer rowid
+        # that vectorlite can use.
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS image_ids (
+                internal_id INTEGER PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                image_id TEXT NOT NULL,
+                UNIQUE(project_id, image_id)
+            )
+            """
+        )
 
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS image_records (
-                image_id TEXT PRIMARY KEY,
+                internal_id INTEGER PRIMARY KEY,
                 r2_key TEXT NOT NULL,
                 content_type TEXT NOT NULL,
                 original_filename TEXT,
@@ -121,7 +148,7 @@ class VectorliteVectorIndex:
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS image_vectors (
-                image_id TEXT PRIMARY KEY,
+                internal_id INTEGER PRIMARY KEY,
                 embedding BLOB NOT NULL
             )
             """
@@ -173,29 +200,33 @@ class VectorliteVectorIndex:
         self.rebuild_vector_index_from_vectors()
 
     def rebuild_vector_index_from_vectors(self) -> None:
-        rows = self.conn.execute("SELECT image_id, embedding FROM image_vectors").fetchall()
+        rows = self.conn.execute("SELECT internal_id, embedding FROM image_vectors").fetchall()
         if not rows:
             return
 
         with self.conn:
-            # Clear existing index + mapping.
+            # Clear existing index.
             self._recreate_virtual_table()
-            self.conn.execute("DELETE FROM image_ids")
-
-            for image_id, embedding_blob in rows:
-                image_id_s = str(image_id)
-                rowid = self._ensure_rowid(image_id_s)
+            for internal_id, embedding_blob in rows:
+                rowid = int(internal_id)
                 self.conn.execute("INSERT INTO v_images(rowid, embedding) VALUES (?, ?)", (rowid, embedding_blob))
 
-    def _rowid_for_image_id(self, image_id: str) -> int | None:
-        row = self.conn.execute("SELECT rowid FROM image_ids WHERE image_id = ?", (image_id,)).fetchone()
+    def _rowid_for_image_id(self, *, project_id: str, image_id: str) -> int | None:
+        row = self.conn.execute(
+            "SELECT internal_id FROM image_ids WHERE project_id = ? AND image_id = ?",
+            (project_id, image_id),
+        ).fetchone()
         if not row:
             return None
         return int(row[0])
 
-    def _ensure_rowid(self, image_id: str) -> int:
-        self.conn.execute("INSERT OR IGNORE INTO image_ids(image_id) VALUES (?)", (image_id,))
-        rowid = self._rowid_for_image_id(image_id)
+    def _ensure_rowid(self, *, project_id: str, image_id: str) -> int:
+        self.ensure_project(project_id=project_id)
+        self.conn.execute(
+            "INSERT OR IGNORE INTO image_ids(project_id, image_id) VALUES (?, ?)",
+            (project_id, image_id),
+        )
+        rowid = self._rowid_for_image_id(project_id=project_id, image_id=image_id)
         if rowid is None:
             raise RuntimeError("Failed to allocate rowid for image_id")
         return rowid
@@ -209,28 +240,29 @@ class VectorliteVectorIndex:
 
         # One transaction: vector + metadata.
         with self.conn:
-            rowid = self._ensure_rowid(record.id)
+            self.ensure_project(project_id=record.project_id)
+            rowid = self._ensure_rowid(project_id=record.project_id, image_id=record.id)
             self.conn.execute("DELETE FROM v_images WHERE rowid = ?", (rowid,))
             self.conn.execute("INSERT INTO v_images(rowid, embedding) VALUES (?, ?)", (rowid, blob))
             self.conn.execute(
                 """
-                INSERT INTO image_vectors(image_id, embedding) VALUES (?, ?)
-                ON CONFLICT(image_id) DO UPDATE SET embedding=excluded.embedding
+                INSERT INTO image_vectors(internal_id, embedding) VALUES (?, ?)
+                ON CONFLICT(internal_id) DO UPDATE SET embedding=excluded.embedding
                 """,
-                (record.id, blob),
+                (rowid, blob),
             )
             self.conn.execute(
                 """
-                INSERT INTO image_records(image_id, r2_key, content_type, original_filename, size_bytes)
+                INSERT INTO image_records(internal_id, r2_key, content_type, original_filename, size_bytes)
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(image_id) DO UPDATE SET
+                ON CONFLICT(internal_id) DO UPDATE SET
                     r2_key=excluded.r2_key,
                     content_type=excluded.content_type,
                     original_filename=excluded.original_filename,
                     size_bytes=excluded.size_bytes
                 """,
                 (
-                    record.id,
+                    rowid,
                     record.r2_key,
                     record.content_type,
                     record.original_filename,
@@ -238,22 +270,23 @@ class VectorliteVectorIndex:
                 ),
             )
 
-    def delete_image(self, *, image_id: str) -> None:
+    def delete_image(self, *, project_id: str, image_id: str) -> None:
         # One transaction: vector + metadata.
         with self.conn:
-            rowid = self._rowid_for_image_id(image_id)
+            rowid = self._rowid_for_image_id(project_id=project_id, image_id=image_id)
             if rowid is not None:
                 self.conn.execute("DELETE FROM v_images WHERE rowid = ?", (rowid,))
-                self.conn.execute("DELETE FROM image_ids WHERE rowid = ?", (rowid,))
-            self.conn.execute("DELETE FROM image_vectors WHERE image_id = ?", (image_id,))
-            self.conn.execute("DELETE FROM image_records WHERE image_id = ?", (image_id,))
+                self.conn.execute("DELETE FROM image_ids WHERE internal_id = ?", (rowid,))
+                self.conn.execute("DELETE FROM image_vectors WHERE internal_id = ?", (rowid,))
+                self.conn.execute("DELETE FROM image_records WHERE internal_id = ?", (rowid,))
 
     def upsert(self, *, item_id: str, vector: np.ndarray) -> None:
         vec = vector.astype(np.float32, copy=False)
         if vec.ndim != 1 or vec.shape[0] != self.vector_dim:
             raise ValueError(f"Unexpected vector shape: {tuple(vec.shape)}")
 
-        rowid = self._ensure_rowid(item_id)
+        # Legacy API (unscoped). Prefer upsert_image().
+        rowid = self._ensure_rowid(project_id="default", image_id=item_id)
 
         blob = vec.tobytes()
         with self.conn:
@@ -261,51 +294,59 @@ class VectorliteVectorIndex:
             self.conn.execute("INSERT INTO v_images(rowid, embedding) VALUES (?, ?)", (rowid, blob))
             self.conn.execute(
                 """
-                INSERT INTO image_vectors(image_id, embedding) VALUES (?, ?)
-                ON CONFLICT(image_id) DO UPDATE SET embedding=excluded.embedding
+                INSERT INTO image_vectors(internal_id, embedding) VALUES (?, ?)
+                ON CONFLICT(internal_id) DO UPDATE SET embedding=excluded.embedding
                 """,
-                (item_id, blob),
+                (rowid, blob),
             )
 
     def delete(self, *, item_id: str) -> None:
-        rowid = self._rowid_for_image_id(item_id)
+        rowid = self._rowid_for_image_id(project_id="default", image_id=item_id)
         if rowid is None:
             return
         with self.conn:
             self.conn.execute("DELETE FROM v_images WHERE rowid = ?", (rowid,))
-            self.conn.execute("DELETE FROM image_ids WHERE rowid = ?", (rowid,))
-            self.conn.execute("DELETE FROM image_vectors WHERE image_id = ?", (item_id,))
+            self.conn.execute("DELETE FROM image_ids WHERE internal_id = ?", (rowid,))
+            self.conn.execute("DELETE FROM image_vectors WHERE internal_id = ?", (rowid,))
 
     def upsert_record(self, record: ImageRecord) -> None:
         with self.conn:
+            self.ensure_project(project_id=record.project_id)
+            rowid = self._ensure_rowid(project_id=record.project_id, image_id=record.id)
             self.conn.execute(
-            """
-            INSERT INTO image_records(image_id, r2_key, content_type, original_filename, size_bytes)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(image_id) DO UPDATE SET
-                r2_key=excluded.r2_key,
-                content_type=excluded.content_type,
-                original_filename=excluded.original_filename,
-                size_bytes=excluded.size_bytes
-            """,
-            (
-                record.id,
-                record.r2_key,
-                record.content_type,
-                record.original_filename,
-                int(record.size_bytes),
-            ),
+                """
+                INSERT INTO image_records(internal_id, r2_key, content_type, original_filename, size_bytes)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(internal_id) DO UPDATE SET
+                    r2_key=excluded.r2_key,
+                    content_type=excluded.content_type,
+                    original_filename=excluded.original_filename,
+                    size_bytes=excluded.size_bytes
+                """,
+                (
+                    rowid,
+                    record.r2_key,
+                    record.content_type,
+                    record.original_filename,
+                    int(record.size_bytes),
+                ),
             )
 
-    def get_record(self, *, image_id: str) -> ImageRecord | None:
+    def get_record(self, *, project_id: str, image_id: str) -> ImageRecord | None:
         row = self.conn.execute(
-            "SELECT image_id, r2_key, content_type, original_filename, size_bytes FROM image_records WHERE image_id = ?",
-            (image_id,),
+            """
+            SELECT ids.project_id, ids.image_id, rec.r2_key, rec.content_type, rec.original_filename, rec.size_bytes
+            FROM image_ids ids
+            JOIN image_records rec ON rec.internal_id = ids.internal_id
+            WHERE ids.project_id = ? AND ids.image_id = ?
+            """,
+            (project_id, image_id),
         ).fetchone()
         if not row:
             return None
-        image_id_s, r2_key, content_type, original_filename, size_bytes = row
+        project_id_s, image_id_s, r2_key, content_type, original_filename, size_bytes = row
         return ImageRecord(
+            project_id=str(project_id_s),
             id=str(image_id_s),
             r2_key=str(r2_key),
             content_type=str(content_type),
@@ -313,18 +354,29 @@ class VectorliteVectorIndex:
             size_bytes=int(size_bytes),
         )
 
-    def delete_record(self, *, image_id: str) -> None:
+    def delete_record(self, *, project_id: str, image_id: str) -> None:
         with self.conn:
-            self.conn.execute("DELETE FROM image_records WHERE image_id = ?", (image_id,))
+            rowid = self._rowid_for_image_id(project_id=project_id, image_id=image_id)
+            if rowid is None:
+                return
+            self.conn.execute("DELETE FROM image_records WHERE internal_id = ?", (rowid,))
 
-    def list_records(self) -> list[ImageRecord]:
+    def list_records(self, *, project_id: str) -> list[ImageRecord]:
         rows = self.conn.execute(
-            "SELECT image_id, r2_key, content_type, original_filename, size_bytes FROM image_records ORDER BY image_id"
+            """
+            SELECT ids.project_id, ids.image_id, rec.r2_key, rec.content_type, rec.original_filename, rec.size_bytes
+            FROM image_ids ids
+            JOIN image_records rec ON rec.internal_id = ids.internal_id
+            WHERE ids.project_id = ?
+            ORDER BY ids.image_id
+            """,
+            (project_id,),
         ).fetchall()
         out: list[ImageRecord] = []
-        for image_id, r2_key, content_type, original_filename, size_bytes in rows:
+        for project_id_s, image_id, r2_key, content_type, original_filename, size_bytes in rows:
             out.append(
                 ImageRecord(
+                    project_id=str(project_id_s),
                     id=str(image_id),
                     r2_key=str(r2_key),
                     content_type=str(content_type),
@@ -347,8 +399,8 @@ class VectorliteVectorIndex:
         sql = """
             SELECT ids.image_id, rec.r2_key, rec.content_type, rec.original_filename, rec.size_bytes, v.distance
             FROM v_images v
-            JOIN image_ids ids ON v.rowid = ids.rowid
-            JOIN image_records rec ON rec.image_id = ids.image_id
+            JOIN image_ids ids ON v.rowid = ids.internal_id
+            JOIN image_records rec ON rec.internal_id = ids.internal_id
             WHERE knn_search(v.embedding, knn_param(?, ?))
         """
         rows = self.conn.execute(sql, (query_blob, int(limit))).fetchall()
@@ -363,7 +415,7 @@ class VectorliteVectorIndex:
         results.sort(key=lambda x: x[1], reverse=True)
         return results
 
-    def search_records(self, *, vector: np.ndarray, limit: int) -> list[tuple[ImageRecord, float]]:
+    def search_records(self, *, project_id: str, vector: np.ndarray, limit: int) -> list[tuple[ImageRecord, float]]:
         if limit <= 0:
             return []
 
@@ -373,17 +425,18 @@ class VectorliteVectorIndex:
 
         query_blob = vec.tobytes()
         sql = """
-            SELECT ids.image_id, rec.r2_key, rec.content_type, rec.original_filename, rec.size_bytes, v.distance
+            SELECT ids.project_id, ids.image_id, rec.r2_key, rec.content_type, rec.original_filename, rec.size_bytes, v.distance
             FROM v_images v
-            JOIN image_ids ids ON v.rowid = ids.rowid
-            JOIN image_records rec ON rec.image_id = ids.image_id
-            WHERE knn_search(v.embedding, knn_param(?, ?))
+            JOIN image_ids ids ON v.rowid = ids.internal_id
+            JOIN image_records rec ON rec.internal_id = ids.internal_id
+            WHERE ids.project_id = ? AND knn_search(v.embedding, knn_param(?, ?))
         """
-        rows = self.conn.execute(sql, (query_blob, int(limit))).fetchall()
+        rows = self.conn.execute(sql, (project_id, query_blob, int(limit))).fetchall()
 
         out: list[tuple[ImageRecord, float]] = []
-        for image_id, r2_key, content_type, original_filename, size_bytes, distance in rows:
+        for project_id_s, image_id, r2_key, content_type, original_filename, size_bytes, distance in rows:
             record = ImageRecord(
+                project_id=str(project_id_s),
                 id=str(image_id),
                 r2_key=str(r2_key),
                 content_type=str(content_type),
@@ -402,6 +455,13 @@ class VectorliteVectorIndex:
     def ids(self) -> list[str]:
         rows = self.conn.execute("SELECT image_id FROM image_ids").fetchall()
         return [str(r[0]) for r in rows]
+
+    def ensure_project(self, *, project_id: str) -> None:
+        self.conn.execute("INSERT OR IGNORE INTO projects(project_id) VALUES (?)", (project_id,))
+
+    def project_exists(self, *, project_id: str) -> bool:
+        row = self.conn.execute("SELECT 1 FROM projects WHERE project_id = ?", (project_id,)).fetchone()
+        return row is not None
 
     def close(self) -> None:
         try:

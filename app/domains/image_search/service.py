@@ -15,6 +15,34 @@ from app.domains.image_search.vectordb import ImageRecord
 from app.domains.image_search.schemas import SearchImagesRequest
 
 
+def _normalize_prefix(prefix: str) -> str:
+    prefix = (prefix or "").strip()
+    if not prefix:
+        return ""
+    if not prefix.endswith("/"):
+        prefix += "/"
+    return prefix
+
+
+def _image_search_remote_prefix() -> str:
+    # For R2 keys of uploaded images.
+    # Example: AI/SEARCH/{project_id}/{image_id}.jpg
+    return _normalize_prefix(os.getenv("IMAGE_SEARCH_REMOTE_PREFIX", "AI/SEARCH/"))
+
+
+def _validate_project_id(project_id: str) -> str:
+    project_id = (project_id or "").strip()
+    if not project_id:
+        raise AppError(code="INVALID_PROJECT", message="project_id is required", http_status=400)
+    if len(project_id) > 128:
+        raise AppError(code="INVALID_PROJECT", message="project_id is too long", http_status=400)
+    import re
+
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", project_id):
+        raise AppError(code="INVALID_PROJECT", message="Invalid project_id format", http_status=400)
+    return project_id
+
+
 def _get_state(request: Request):
     state = getattr(request.app.state, IMAGE_SEARCH_KEY, None)
     if state is None:
@@ -37,9 +65,10 @@ async def _best_effort_r2_delete(*, r2: object, key: str, reason: str) -> None:
         print(f"WARNING: failed to delete R2 object: key={key} reason={reason} error={exc!r}")
 
 
-async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
+async def register_image(request: Request, *, project_id: str, file: UploadFile) -> ImageRecord:
     state = _get_state(request)
     r2 = _get_r2(request)
+    project_id = _validate_project_id(project_id)
 
     if not file.content_type or not file.content_type.startswith("image/"):
         raise AppError(code="INVALID_IMAGE", message="Only image/* uploads are allowed", http_status=400)
@@ -56,8 +85,9 @@ async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
 
     suffix = _safe_suffix(file.filename)
 
-    # Upload original bytes to R2.
-    r2_key = f"image_search/{image_id}{suffix}"
+    # Upload original bytes to R2 (project-scoped).
+    r2_prefix = _image_search_remote_prefix()
+    r2_key = f"{r2_prefix}{project_id}/{image_id}{suffix}"
     upload = partial(
         r2.upload_bytes,
         key=r2_key,
@@ -97,6 +127,7 @@ async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
             pass
 
     record = ImageRecord(
+        project_id=project_id,
         id=image_id,
         content_type=file.content_type,
         original_filename=file.filename,
@@ -115,13 +146,17 @@ async def register_image(request: Request, *, file: UploadFile) -> ImageRecord:
     return record
 
 
-async def delete_image(request: Request, *, image_id: str) -> None:
+async def delete_image(request: Request, *, project_id: str, image_id: str) -> None:
     state = _get_state(request)
     r2 = _get_r2(request)
+    project_id = _validate_project_id(project_id)
     async with state.lock:
-        record = state.record_store.get_record(image_id=image_id)
+        exists = getattr(state.record_store, "project_exists", None)
+        if callable(exists) and not exists(project_id=project_id):
+            raise AppError(code="PROJECT_NOT_FOUND", message="Project not found", http_status=404)
+        record = state.record_store.get_record(project_id=project_id, image_id=image_id)
         if record is not None:
-            state.vector_index.delete_image(image_id=image_id)
+            state.vector_index.delete_image(project_id=project_id, image_id=image_id)
 
     if record is None:
         raise AppError(code="NOT_FOUND", message="Image not found", http_status=404)
@@ -140,14 +175,21 @@ async def delete_image(request: Request, *, image_id: str) -> None:
         ) from exc
 
 
-async def list_images(request: Request) -> list[ImageRecord]:
+async def list_images(request: Request, *, project_id: str) -> list[ImageRecord]:
     state = _get_state(request)
+    project_id = _validate_project_id(project_id)
     async with state.lock:
-        return state.record_store.list_records()
+        exists = getattr(state.record_store, "project_exists", None)
+        if callable(exists) and not exists(project_id=project_id):
+            raise AppError(code="PROJECT_NOT_FOUND", message="Project not found", http_status=404)
+        return state.record_store.list_records(project_id=project_id)
 
 
-async def search_images(request: Request, *, payload: SearchImagesRequest) -> list[tuple[ImageRecord, float]]:
+async def search_images(
+    request: Request, *, project_id: str, payload: SearchImagesRequest
+) -> list[tuple[ImageRecord, float]]:
     state = _get_state(request)
+    project_id = _validate_project_id(project_id)
 
     try:
         limit = request.app.state.limits.get(IMAGE_SEARCH_KEY)
@@ -166,25 +208,32 @@ async def search_images(request: Request, *, payload: SearchImagesRequest) -> li
         raise InferenceError(detail=str(exc)) from exc
 
     async with state.lock:
+        exists = getattr(state.record_store, "project_exists", None)
+        if callable(exists) and not exists(project_id=project_id):
+            raise AppError(code="PROJECT_NOT_FOUND", message="Project not found", http_status=404)
         # Prefer a single DB query that also returns metadata.
         search_records = getattr(state.vector_index, "search_records", None)
         if callable(search_records):
-            return search_records(vector=vec, limit=payload.limit)
+            return search_records(project_id=project_id, vector=vec, limit=payload.limit)
 
         # Fallback: resolve ids to records (older interface).
         ids = state.vector_index.search(vector=vec, limit=payload.limit)
         out: list[tuple[ImageRecord, float]] = []
         for image_id, score in ids:
-            rec = state.record_store.get_record(image_id=image_id)
+            rec = state.record_store.get_record(project_id=project_id, image_id=image_id)
             if rec is not None:
                 out.append((rec, score))
         return out
 
 
-async def get_image_record(request: Request, *, image_id: str) -> ImageRecord:
+async def get_image_record(request: Request, *, project_id: str, image_id: str) -> ImageRecord:
     state = _get_state(request)
+    project_id = _validate_project_id(project_id)
     async with state.lock:
-        record = state.record_store.get_record(image_id=image_id)
+        exists = getattr(state.record_store, "project_exists", None)
+        if callable(exists) and not exists(project_id=project_id):
+            raise AppError(code="PROJECT_NOT_FOUND", message="Project not found", http_status=404)
+        record = state.record_store.get_record(project_id=project_id, image_id=image_id)
         if record is None:
             raise AppError(code="NOT_FOUND", message="Image not found", http_status=404)
 
@@ -194,12 +243,18 @@ async def get_image_record(request: Request, *, image_id: str) -> ImageRecord:
         return record
 
 
-async def get_image_presigned_url(request: Request, *, image_id: str, expires_in: int = 3600) -> str:
+async def get_image_presigned_url(
+    request: Request, *, project_id: str, image_id: str, expires_in: int = 3600
+) -> str:
     state = _get_state(request)
     r2 = _get_r2(request)
+    project_id = _validate_project_id(project_id)
 
     async with state.lock:
-        record = state.record_store.get_record(image_id=image_id)
+        exists = getattr(state.record_store, "project_exists", None)
+        if callable(exists) and not exists(project_id=project_id):
+            raise AppError(code="PROJECT_NOT_FOUND", message="Project not found", http_status=404)
+        record = state.record_store.get_record(project_id=project_id, image_id=image_id)
         if record is None:
             raise AppError(code="NOT_FOUND", message="Image not found", http_status=404)
         if not record.r2_key:

@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class UploadImageResponse(BaseModel):
+    project_id: str
     id: str
     r2_key: str
     original_filename: str | None = None
@@ -12,6 +13,7 @@ class UploadImageResponse(BaseModel):
 
 
 class ImageInfo(BaseModel):
+    project_id: str
     id: str
     r2_key: str
     original_filename: str | None = None
@@ -29,6 +31,7 @@ class SearchImagesRequest(BaseModel):
 
 
 class SearchResult(BaseModel):
+    project_id: str
     id: str
     r2_key: str
     score: float

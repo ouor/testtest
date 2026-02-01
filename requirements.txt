@@ -18,6 +18,8 @@ python-multipart
 uvicorn[standard]
 pillow
 gradio
+openai
+requests
 
 # Vector DB
 vectorlite-py

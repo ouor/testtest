@@ -79,6 +79,18 @@ curl http://localhost:8000/readyz | python -m json.tool
 | 음성 생성  | VOICE_ENABLED        | 0   |
 | R2 연동  | R2_ENABLED           | 0   |
 
+### R2 업로드 키 Prefix (이미지 생성)
+
+이미지 생성 결과를 R2에 저장할 때, 업로드 key 앞에 고정 prefix를 붙일 수 있습니다.
+
+예:
+
+```bash
+export IMAGE_REMOTE_PREFIX="AI/POSTER/"
+```
+
+이 경우 `/v1/r2/images/generate`가 반환하는 key는 항상 `AI/POSTER/`로 시작합니다.
+
 ---
 
 ## 5. 이미지 생성
@@ -97,10 +109,22 @@ POST /v1/images/generate
 curl -s http://localhost:8000/v1/images/generate \
   -H 'Content-Type: application/json' \
   -d '{
-    "prompt": "A serene landscape with mountains and a river during sunset.",
-    "seed": 42
+    "title": "햄릿",
+    "description": "덴마크 왕자의 복수와 광기를 다룬 비극. 어두운 궁정, 배신, 유령의 계시."
   }' \
   --output out.png
+```
+
+### 프롬프트 생성(OpenAI)
+
+이미지 생성은 입력으로 직접 prompt를 받지 않고, `title`/`description`으로부터 OpenAI GPT 모델(`gpt-4.1`)을 사용해 1문장 포스터 캡션을 생성한 뒤 그 결과로 이미지 추론을 수행합니다.
+
+필수 환경 변수:
+
+```bash
+export OPENAI_API_KEY=...
+export OPENAI_PROMPT_MODEL=gpt-4.1   # optional
+export OPENAI_BASE_URL=...           # optional
 ```
 
 ---
@@ -119,8 +143,8 @@ POST /v1/r2/images/generate
 curl -s http://localhost:8000/v1/r2/images/generate \
   -H 'Content-Type: application/json' \
   -d '{
-    "prompt": "A serene landscape with mountains and a river during sunset.",
-    "seed": 42
+    "title": "햄릿",
+    "description": "덴마크 왕자의 복수와 광기를 다룬 비극. 어두운 궁정, 배신, 유령의 계시."
   }' | python -m json.tool
 ```
 

@@ -19,8 +19,12 @@ def build_image_generation_tab(*, base_url: gr.Textbox, timeout: gr.Number) -> N
 
     with left:
         use_r2 = r2_toggle(default=False)
-        prompt = gr.Textbox(label="Prompt", value="A serene landscape with mountains and a river during sunset.")
-        seed = gr.Number(label="Seed", value=42, precision=0)
+        title = gr.Textbox(label="Play title", value="햄릿")
+        description = gr.Textbox(
+            label="Play description",
+            value="덴마크 왕자의 복수와 광기를 다룬 비극. 어두운 궁정, 배신, 유령의 계시.",
+            lines=4,
+        )
         r2_key = gr.Textbox(label="(R2) key (optional)", placeholder="images/generated/custom.png", visible=False)
         run = gr.Button("Generate")
         status = gr.Markdown("")
@@ -30,15 +34,18 @@ def build_image_generation_tab(*, base_url: gr.Textbox, timeout: gr.Number) -> N
     init_req = ExampleRequest(
         method="POST",
         url=join_api(base_url.value or "http://localhost:8000", "/v1/images/generate"),
-        json_body={"prompt": "A serene landscape with mountains and a river during sunset.", "seed": 42},
+        json_body={
+            "title": "햄릿",
+            "description": "덴마크 왕자의 복수와 광기를 다룬 비극. 어두운 궁정, 배신, 유령의 계시.",
+        },
     )
     init_examples = generate_all(init_req)
 
     with right:
         panel = CodePanel().build(initial=init_examples)
 
-    def _example(api_base_url: str, r2: bool, p: str, s: float, key: str):
-        payload: dict[str, Any] = {"prompt": p, "seed": int(s) if s is not None else 42}
+    def _example(api_base_url: str, r2: bool, t: str, d: str, key: str):
+        payload: dict[str, Any] = {"title": t, "description": d}
         if r2 and key.strip():
             payload["key"] = key.strip()
 
@@ -55,9 +62,9 @@ def build_image_generation_tab(*, base_url: gr.Textbox, timeout: gr.Number) -> N
             gr.update(visible=bool(r2)),
         )
 
-    def _call(api_base_url: str, timeout_seconds: float, r2: bool, p: str, s: float, key: str):
+    def _call(api_base_url: str, timeout_seconds: float, r2: bool, t: str, d: str, key: str):
         client = HttpClient(timeout_seconds=float(timeout_seconds))
-        payload: dict[str, Any] = {"prompt": p, "seed": int(s) if s is not None else 42}
+        payload: dict[str, Any] = {"title": t, "description": d}
         if r2 and key.strip():
             payload["key"] = key.strip()
 
@@ -80,11 +87,11 @@ def build_image_generation_tab(*, base_url: gr.Textbox, timeout: gr.Number) -> N
     # Events
     use_r2.change(_toggle, inputs=[use_r2], outputs=[r2_key, image_out, json_out])
 
-    for comp in [base_url, use_r2, prompt, seed, r2_key]:
-        comp.change(_example, inputs=[base_url, use_r2, prompt, seed, r2_key], outputs=panel.outputs())
+    for comp in [base_url, use_r2, title, description, r2_key]:
+        comp.change(_example, inputs=[base_url, use_r2, title, description, r2_key], outputs=panel.outputs())
 
     run.click(
         _call,
-        inputs=[base_url, timeout, use_r2, prompt, seed, r2_key],
+        inputs=[base_url, timeout, use_r2, title, description, r2_key],
         outputs=[status, image_out, json_out],
     )

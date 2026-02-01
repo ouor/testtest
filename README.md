@@ -1,405 +1,172 @@
-# AI Model Server (FastAPI)
-
-이미지 생성, 이미지 시맨틱 검색, 음성 생성을 제공하는 FastAPI 기반 AI 모델 서버입니다.  
-이미지 검색 및 일부 생성 결과는 **Cloudflare R2를 필수 스토리지**로 사용합니다.
-
-모든 기능은 환경 변수로 독립적으로 활성화/비활성화할 수 있습니다.
+# Common AI Server
 
 ---
 
-## 1. 제공 기능 요약
+## 1. 개요 (Overview)
 
-- 🖼️ **이미지 생성**
-  - 파일 바이너리 응답
-  - R2 저장 후 key 반환
-- 🔊 **참조 음성 기반 음성 생성**
-  - 로컬 mp3 반환
-  - R2 저장 후 key 반환
-- 🔍 **이미지 업로드 + 텍스트 기반 시맨틱 검색**
-  - 이미지 원본은 R2에 저장
-  - CLIP 임베딩 기반 검색
-- ☁️ **Cloudflare R2 연동 (필수/선택 혼합)**
+FastAPI 기반의 멀티모달 AI 모델 서버입니다. 이미지 생성, CLIP 기반 시맨틱 검색, 음성 합성 기능을 제공하며, Cloudflare R2를 영구 저장소로 활용합니다. 모든 기능은 환경 변수를 통해 모듈식으로 제어됩니다.
 
----
+## 2. 아키텍처 (Architecture)
 
-## 2. 아키텍처 개요
+* **동기화:** `max_concurrency=1` 세마포어를 통해 GPU 리소스를 보호하며 순차 추론을 수행합니다.
+* **저장소:**
+* **Local:** 임시 파일 처리 및 SQLite(벡터 인덱스) 저장.
+* **Cloudflare R2:** 최종 결과물 저장, DB 백업 스냅샷 관리.
 
-- FastAPI 기반 REST API
-- 모델은 서버 시작 시 1회 로드 (lifespan)
-- 모든 추론은 세마포어로 직렬 처리 (`max_concurrency = 1`)
-- 기능별 모듈화:
-  - Image Generation
-  - Voice Generation
-  - Image Search (R2 기반)
-  - R2 Storage Utility
+
 
 ---
 
-## 3. Quick Start (이미지 생성만 사용)
+## 3. 기능 요약 (Features)
 
-### 3.1 실행
+* **Image:** OpenAI GPT-4.1 기반 프롬프트 최적화 후 이미지 생성.
+* **Search:** CLIP 임베딩을 이용한 텍스트-이미지 간 시맨틱 검색.
+* **Voice:** 참조 오디오를 활용한 Zero-shot 보이스 클로닝 및 TTS.
+
+---
+
+## 4. Quick Start
 
 ```bash
-conda create -n default python=3.10
-conda activate default
-conda install forge:uv
+conda create -n ai-server python=3.10 -y
+conda activate ai-server
+conda install forge:uv -y
 uv pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# Gradio demo 실행
-export DEMO_API_BASE_URL=http://localhost:8000
-export DEMO_TIMEOUT_SECONDS=60
-python -m demo
-````
-
-### 3.2 헬스 체크
-
-`GET /healthz`: 서버 상태 확인  
-`GET /readyz`: 모델 로드 완료 확인
-
-```bash
-curl http://localhost:8000/healthz | python -m json.tool
-curl http://localhost:8000/readyz | python -m json.tool
 ```
+
+* **Health Check:** `GET /healthz` (서버 상태), `GET /readyz` (모델 로드 상태)
 
 ---
 
-## 4. 공통 설정 (Environment Variables)
+## 5. 전체 API 엔드포인트 및 예제
 
-- `IMAGE_SEARCH_DB_R2_KEY` (default: `image_search.db`) - R2 key used for DB restore/backup snapshots
-- `IMAGE_SEARCH_DB_BACKUP_ENABLED` (default: `1`) - set `0` to disable DB backup/restore via R2
-- `IMAGE_SEARCH_DB_BACKUP_INTERVAL_SECONDS` (default: `1800`) - periodic DB backup interval
+### 5.1 이미지 생성 (Image Generation)
 
-### 기능 토글
+OpenAI GPT를 거쳐 생성된 프롬프트로 이미지를 생성합니다.
 
-| 기능     | 변수                   | 기본값 |
-| ------ | -------------------- | --- |
-| 이미지 생성 | IMAGE_ENABLED        | 1   |
-| 이미지 검색 | IMAGE_SEARCH_ENABLED | 0   |
-| 음성 생성  | VOICE_ENABLED        | 0   |
-| R2 연동  | R2_ENABLED           | 0   |
-
-### R2 업로드 키 Prefix (이미지 생성)
-
-이미지 생성 결과를 R2에 저장할 때, 업로드 key 앞에 고정 prefix를 붙일 수 있습니다.
-
-예:
-
-```bash
-export IMAGE_REMOTE_PREFIX="AI/POSTER/"
-```
-
-이 경우 `/v1/r2/images/generate`가 반환하는 key는 항상 `AI/POSTER/`로 시작합니다.
-
----
-
-## 5. 이미지 생성
-
-### 5.1 로컬 이미지 생성
-
-**Endpoint**
-
-```
-POST /v1/images/generate
-```
-
-**Example**
-
+* **로컬 생성** (`POST /v1/images/generate`)
 ```bash
 curl -s http://localhost:8000/v1/images/generate \
   -H 'Content-Type: application/json' \
-  -d '{
-    "title": "햄릿",
-    "description": "덴마크 왕자의 복수와 광기를 다룬 비극. 어두운 궁정, 배신, 유령의 계시."
-  }' \
-  --output out.png
-```
-
-### 프롬프트 생성(OpenAI)
-
-이미지 생성은 입력으로 직접 prompt를 받지 않고, `title`/`description`으로부터 OpenAI GPT 모델(`gpt-4.1`)을 사용해 1문장 포스터 캡션을 생성한 뒤 그 결과로 이미지 추론을 수행합니다.
-
-필수 환경 변수:
-
-```bash
-export OPENAI_API_KEY=...
-export OPENAI_PROMPT_MODEL=gpt-4.1   # optional
-export OPENAI_BASE_URL=...           # optional
-```
-
----
-
-### 5.2 R2 이미지 생성
-
-**Endpoint**
+  -d '{"title": "햄릿", "description": "복수와 광기의 비극"}' --output out.png
 
 ```
-POST /v1/r2/images/generate
-```
 
-**Example**
 
+* **R2 저장형 생성** (`POST /v1/r2/images/generate`)
 ```bash
 curl -s http://localhost:8000/v1/r2/images/generate \
   -H 'Content-Type: application/json' \
-  -d '{
-    "title": "햄릿",
-    "description": "덴마크 왕자의 복수와 광기를 다룬 비극. 어두운 궁정, 배신, 유령의 계시."
-  }' | python -m json.tool
+  -d '{"title": "햄릿", "description": "복수와 광기의 비극"}' | jq
+
 ```
 
-**Response**
 
-```json
-{
-  "key": "images/generated/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.png"
-}
+
+### 5.2 이미지 검색 (Image Search - R2 필수)
+
+`project_id` 기반으로 이미지를 관리하며, 첫 업로드 시 프로젝트가 자동 생성됩니다.
+
+* **이미지 업로드** (`POST /v1/projects/{project_id}/images`)
+```bash
+curl -F "file=@test.jpg" http://localhost:8000/v1/projects/my_project/images
+
 ```
+
+
+* **목록 조회** (`GET /v1/projects/{project_id}/images`)
+```bash
+curl http://localhost:8000/v1/projects/my_project/images
+
+```
+
+
+* **시맨틱 검색** (`POST /v1/projects/{project_id}/images/search`)
+```bash
+curl -X POST http://localhost:8000/v1/projects/my_project/images/search \
+  -H 'Content-Type: application/json' -d '{"query": "고양이", "limit": 5}'
+
+```
+
+
+* **파일 다운로드 (Redirect)** (`GET /v1/projects/{project_id}/images/{id}/file`)
+```bash
+curl -L http://localhost:8000/v1/projects/my_project/images/123/file --output down.jpg
+
+```
+
+
+* **이미지 삭제** (`DELETE /v1/projects/{project_id}/images/{id}`)
+```bash
+curl -X DELETE http://localhost:8000/v1/projects/my_project/images/123
+
+```
+
+
+
+### 5.3 음성 생성 (Voice Generation)
+
+* **로컬 생성 (Multipart)** (`POST /v1/voice/generate`)
+```bash
+curl -F "ref_audio=@ref.mp3" -F "ref_text=안녕" -F "text=반가워" \
+  http://localhost:8000/v1/voice/generate --output voice.mp3
+
+```
+
+
+* **R2 기반 생성 (JSON)** (`POST /v1/r2/voice/generate`)
+*R2의 `{VOICE_REMOTE_PREFIX}{user_id}.mp3` 파일을 자동 참조합니다.*
+```bash
+curl -X POST http://localhost:8000/v1/r2/voice/generate \
+  -H 'Content-Type: application/json' -d '{"user_id": "user1", "text": "반가워"}'
+
+```
+
+
 
 ---
 
-### 참고 사항
+## 6. .env 환경변수 설정
 
-* `IMAGE_ENABLED=0` 설정 시 이미지 모델을 로드하지 않습니다.
-* 모델은 서버 시작 시 1회 로드됩니다.
-
----
-
-## 6. 이미지 검색
-
-> ⚠️ 이미지 검색 기능은 **Cloudflare R2**가 반드시 필요합니다.
-
-### 6.1 개념 및 저장 구조
-
-* 이미지 업로드 시:
-
-  * 원본 바이트 → **R2 저장** (프로젝트별 prefix)
-  * 서버는 UUID + `r2_key`만 관리
-
-* 프로젝트 생성:
-
-  * 별도 “프로젝트 생성 API”는 없으며, **해당 project_id로 첫 업로드 시 자동 생성**됩니다.
-  * 업로드 전에 존재하지 않는 project_id로 `list/search/get/delete` 호출 시 `404 PROJECT_NOT_FOUND`가 반환됩니다.
-* CLIP 임베딩 및 벡터 인덱스:
-
-  * SQLite (`IMAGE_SEARCH_DB_PATH`)에 영구 저장
-* 임베딩 처리 중 임시 파일은 OS 임시 디렉터리를 사용합니다.
-
----
-
-### 6.2 환경 변수
-
-| 변수                        | 기본값                     | 설명         |
-| ------------------------- | ----------------------- | ---------- |
-| IMAGE_SEARCH_ENABLED      | 1                       | 이미지 검색 활성화 |
-| IMAGE_SEARCH_DB_PATH      | app/image_search.db     | 벡터 DB      |
-| IMAGE_SEARCH_MAX_ELEMENTS | 50000                   | HNSW 용량    |
-| IMAGE_SEARCH_MAX_BYTES    | 20971520                | 최대 업로드 크기  |
-| IMAGE_SEARCH_REMOTE_PREFIX | AI/SEARCH/              | 업로드 이미지 R2 key prefix |
-
----
-
-### 6.3 이미지 업로드
-
-**Endpoint**
-
-```
-POST /v1/projects/{project_id}/images
-```
-
-**Example**
+### 6.1 기능 활성화 및 DB
 
 ```bash
-PROJECT_ID=default
-curl -s http://localhost:8000/v1/projects/$PROJECT_ID/images \
-  -F "file=@test/image01.jpg" | python -m json.tool
-```
+IMAGE_ENABLED=1        # 이미지 생성 활성
+IMAGE_SEARCH_ENABLED=1 # 이미지 검색 활성
+VOICE_ENABLED=1        # 음성 생성 활성
+R2_ENABLED=1           # R2 스토리지 활성
 
----
-
-### 6.4 이미지 목록 조회
-
-**Endpoint**
+IMAGE_SEARCH_DB_PATH=app/image_search.db
+IMAGE_SEARCH_DB_BACKUP_ENABLED=1
+IMAGE_SEARCH_DB_BACKUP_INTERVAL_SECONDS=1800
 
 ```
-GET /v1/projects/{project_id}/images
-```
 
-**Example**
+### 6.2 외부 서비스 연동
 
 ```bash
-PROJECT_ID=default
-curl -s http://localhost:8000/v1/projects/$PROJECT_ID/images | python -m json.tool
+# OpenAI
+OPENAI_API_KEY=sk-...
+OPENAI_PROMPT_MODEL=gpt-4.1
+
+# Cloudflare R2
+R2_ACCOUNT_ID=xxxx
+R2_ACCESS_KEY_ID=xxxx
+R2_SECRET_ACCESS_KEY=xxxx
+R2_BUCKET_NAME=my-bucket
+
 ```
 
----
-
-### 6.5 이미지 검색
-
-**Endpoint**
-
-```
-POST /v1/projects/{project_id}/images/search
-```
-
-**Example**
+### 6.3 경로 및 설정값
 
 ```bash
-PROJECT_ID=default
-curl -s http://localhost:8000/v1/projects/$PROJECT_ID/images/search \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "query": "고양이",
-    "limit": 5
-  }' | python -m json.tool
-```
+IMAGE_REMOTE_PREFIX="AI/POSTER/"
+IMAGE_SEARCH_REMOTE_PREFIX="AI/SEARCH/"
+VOICE_REMOTE_PREFIX="AI/VOICE/"
 
----
+IMAGE_SEARCH_MAX_ELEMENTS=50000
+IMAGE_SEARCH_MAX_BYTES=20971520
 
-### 6.6 이미지 다운로드 (R2 presigned URL redirect)
-
-**Endpoint**
-
-```
-GET /v1/projects/{project_id}/images/{id}/file
-```
-
-**Example (redirect 확인)**
-
-```bash
-PROJECT_ID=default
-curl -s -D - http://localhost:8000/v1/projects/$PROJECT_ID/images/$ID/file
-```
-
-**Example (실제 다운로드)**
-
-```bash
-PROJECT_ID=default
-curl -L -s \
-  http://localhost:8000/v1/projects/$PROJECT_ID/images/$ID/file \
-  --output out.jpg
-```
-
----
-
-### 6.7 이미지 삭제
-
-**Endpoint**
-
-```
-DELETE /v1/projects/{project_id}/images/{id}
-```
-
-**Example**
-
-```bash
-PROJECT_ID=default
-curl -s -X DELETE http://localhost:8000/v1/projects/$PROJECT_ID/images/{id}
-```
-
----
-
-## 7. 음성 생성 (선택 기능)
-
-### 7.1 활성화
-
-```bash
-export VOICE_ENABLED=1
-```
-
----
-
-### 7.2 로컬 음성 생성
-
-**Endpoint**
-
-```
-POST /v1/voice/generate
-```
-
-**Example**
-
-```bash
-curl -s http://localhost:8000/v1/voice/generate \
-  -F "ref_audio=@test/ref.mp3" \
-  -F "ref_text=아이.. 그게 참.. 난 정말 진심으로 말하고 있는거거든.." \
-  -F "text=오전 10시 30분에 예정된 미팅 일정을 다시 한번 확인해 주시겠어요?" \
-  -F "language=Korean" \
-  --output out.mp3
-```
-
----
-
-### 7.3 R2 음성 생성
-
-**Endpoint**
-
-```
-POST /v1/r2/voice/generate
-```
-
-**Example**
-
-```bash
-curl -s http://localhost:8000/v1/r2/voice/generate \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "user_id": "user123",
-    "text": "오전 10시 30분에 예정된 미팅 일정을 다시 한번 확인해 주시겠어요?",
-    "language": "Korean"
-  }' | python -m json.tool
-```
-
-참고: R2 모드에서는 레퍼런스 오디오/텍스트를 직접 넘기지 않고, 아래 경로에서 자동으로 읽습니다.
-
-```text
-{VOICE_REMOTE_PREFIX}{user_id}.mp3
-{VOICE_REMOTE_PREFIX}{user_id}.txt
-```
-
-기본 prefix는 `AI/VOICE/`이며 환경 변수로 변경할 수 있습니다:
-
-```bash
-export VOICE_REMOTE_PREFIX="AI/VOICE/"
-```
-
-**Response**
-
-```json
-{
-  "key": "voice/generated/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.mp3"
-}
-```
-
-### 참고 사항
-
-* 응답 포맷: `audio/mpeg`
-* MP3 인코딩은 `torchaudio` 사용
-* 환경에 따라 ffmpeg 지원이 필요할 수 있습니다.
-
----
-
-## 8. Cloudflare R2 설정
-
-### 개요
-
-* S3-compatible API 사용
-* 이미지 검색 기능에서는 **필수**
-* 이미지/음성 생성에서는 **선택**
-
-### 환경 변수
-
-```bash
-export R2_ENABLED=1
-export R2_ACCOUNT_ID=xxxx
-export R2_ENDPOINT_URL=https://<custom-endpoint>   # optional
-export R2_ACCESS_KEY_ID=xxxx
-export R2_SECRET_ACCESS_KEY=xxxx
-export R2_BUCKET_NAME=xxxx
-```
-
-### 구현 위치
-
-```
-* `app/core/storage/r2.py`
 ```

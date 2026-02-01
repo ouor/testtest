@@ -38,7 +38,7 @@ def build_voice_cloning_tab(*, base_url: gr.Textbox, timeout: gr.Number) -> None
         language = gr.Dropdown(label="language", choices=["Korean", "English", "Japanese", "Chinese"], value="Korean")
 
         # r2 mode
-        ref_audio_key = gr.Textbox(label="(R2) ref_audio_key", placeholder="voice/refs/ref.mp3", visible=False)
+        user_id = gr.Textbox(label="(R2) user_id", placeholder="user123", visible=False)
         out_key = gr.Textbox(label="(R2) key (optional)", placeholder="voice/generated/custom.mp3", visible=False)
 
         run = gr.Button("Generate")
@@ -63,16 +63,26 @@ def build_voice_cloning_tab(*, base_url: gr.Textbox, timeout: gr.Number) -> None
 
     def _toggle(r2: bool):
         return (
-            gr.update(visible=not bool(r2)),
-            gr.update(visible=bool(r2)),
-            gr.update(visible=bool(r2)),
-            gr.update(visible=not bool(r2)),
-            gr.update(visible=bool(r2)),
+            gr.update(visible=not bool(r2)),  # ref_audio
+            gr.update(visible=bool(r2)),  # user_id
+            gr.update(visible=bool(r2)),  # out_key
+            gr.update(visible=not bool(r2)),  # audio_out
+            gr.update(visible=bool(r2)),  # json_out
+            gr.update(visible=not bool(r2)),  # ref_text
         )
 
-    def _example(api_base_url: str, r2: bool, ref_audio_path: str | None, rt: str, t: str, lang: str, rak: str, ok: str):
+    def _example(
+        api_base_url: str,
+        r2: bool,
+        ref_audio_path: str | None,
+        rt: str,
+        t: str,
+        lang: str,
+        uid: str,
+        ok: str,
+    ):
         if r2:
-            payload: dict[str, Any] = {"ref_audio_key": rak or "voice/refs/ref.mp3", "ref_text": rt, "text": t, "language": lang}
+            payload: dict[str, Any] = {"user_id": uid or "user123", "text": t, "language": lang}
             if ok.strip():
                 payload["key"] = ok.strip()
             url = join_api(api_base_url, "/v1/r2/voice/generate")
@@ -99,15 +109,15 @@ def build_voice_cloning_tab(*, base_url: gr.Textbox, timeout: gr.Number) -> None
         rt: str,
         t: str,
         lang: str,
-        rak: str,
+        uid: str,
         ok: str,
     ):
         client = HttpClient(timeout_seconds=float(timeout_seconds))
         try:
             if r2:
-                if not rak.strip():
-                    return "Error", None, {"error": "ref_audio_key is required in R2 mode"}
-                payload: dict[str, Any] = {"ref_audio_key": rak, "ref_text": rt, "text": t, "language": lang}
+                if not uid.strip():
+                    return "Error", None, {"error": "user_id is required in R2 mode"}
+                payload: dict[str, Any] = {"user_id": uid.strip(), "text": t, "language": lang}
                 if ok.strip():
                     payload["key"] = ok.strip()
                 res = post_generate_voice_to_r2(client=client, base_url=api_base_url, payload=payload)
@@ -130,17 +140,17 @@ def build_voice_cloning_tab(*, base_url: gr.Textbox, timeout: gr.Number) -> None
         except Exception as exc:
             return "Error", None, {"error": str(exc)}
 
-    use_r2.change(_toggle, inputs=[use_r2], outputs=[ref_audio, ref_audio_key, out_key, audio_out, json_out])
+    use_r2.change(_toggle, inputs=[use_r2], outputs=[ref_audio, user_id, out_key, audio_out, json_out, ref_text])
 
-    for comp in [base_url, use_r2, ref_text, text, language, ref_audio_key, out_key]:
+    for comp in [base_url, use_r2, ref_text, text, language, user_id, out_key]:
         comp.change(
             _example,
-            inputs=[base_url, use_r2, ref_audio, ref_text, text, language, ref_audio_key, out_key],
+            inputs=[base_url, use_r2, ref_audio, ref_text, text, language, user_id, out_key],
             outputs=panel.outputs(),
         )
 
     run.click(
         _call,
-        inputs=[base_url, timeout, use_r2, ref_audio, ref_text, text, language, ref_audio_key, out_key],
+        inputs=[base_url, timeout, use_r2, ref_audio, ref_text, text, language, user_id, out_key],
         outputs=[status, audio_out, json_out],
     )

@@ -332,11 +332,23 @@ POST /v1/r2/voice/generate
 curl -s http://localhost:8000/v1/r2/voice/generate \
   -H 'Content-Type: application/json' \
   -d '{
-    "ref_audio_key": "voice/refs/ref.mp3",
-    "ref_text": "아이.. 그게 참.. 난 정말 진심으로 말하고 있는거거든..",
+    "user_id": "user123",
     "text": "오전 10시 30분에 예정된 미팅 일정을 다시 한번 확인해 주시겠어요?",
     "language": "Korean"
   }' | python -m json.tool
+```
+
+참고: R2 모드에서는 레퍼런스 오디오/텍스트를 직접 넘기지 않고, 아래 경로에서 자동으로 읽습니다.
+
+```text
+{VOICE_REMOTE_PREFIX}{user_id}.mp3
+{VOICE_REMOTE_PREFIX}{user_id}.txt
+```
+
+기본 prefix는 `AI/VOICE/`이며 환경 변수로 변경할 수 있습니다:
+
+```bash
+export VOICE_REMOTE_PREFIX="AI/VOICE/"
 ```
 
 **Response**

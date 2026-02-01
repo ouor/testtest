@@ -18,6 +18,29 @@ from app.core.errors.exceptions import AppError
 from app.domains.voice_generation.model import VOICE_MODEL_KEY
 from app.domains.voice_generation.schemas import GenerateVoiceRequest, GenerateVoiceToR2Request
 
+
+def _normalize_prefix(prefix: str) -> str:
+    prefix = (prefix or "").strip()
+    if not prefix:
+        return ""
+    if not prefix.endswith("/"):
+        prefix += "/"
+    prefix = prefix.lstrip("/")
+    return prefix
+
+
+def _voice_remote_prefix() -> str:
+    # Default matches the requested behavior.
+    return _normalize_prefix(os.getenv("VOICE_REMOTE_PREFIX", "AI/VOICE/"))
+
+
+def _ref_audio_key_for_user(*, user_id: str) -> str:
+    return f"{_voice_remote_prefix()}{user_id}.mp3"
+
+
+def _ref_text_key_for_user(*, user_id: str) -> str:
+    return f"{_voice_remote_prefix()}{user_id}.txt"
+
 def _safe_suffix(filename: str | None) -> str:
     if not filename:
         return ".bin"
@@ -145,10 +168,13 @@ async def generate_voice_mp3_to_r2(request: Request, *, payload: GenerateVoiceTo
     if r2 is None:
         raise AppError(code="R2_NOT_ENABLED", message="Cloudflare R2 is not enabled", http_status=500)
 
+    ref_audio_key = _ref_audio_key_for_user(user_id=payload.user_id)
+    ref_text_key = _ref_text_key_for_user(user_id=payload.user_id)
+
     # Download reference audio from R2 to a temp file, since qwen-tts expects a file path.
-    suffix = Path(payload.ref_audio_key).suffix
+    suffix = Path(ref_audio_key).suffix
     if not suffix or len(suffix) > 16:
-        suffix = ".bin"
+        suffix = ".mp3"
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_ref:
         ref_path = tmp_ref.name
@@ -156,24 +182,61 @@ async def generate_voice_mp3_to_r2(request: Request, *, payload: GenerateVoiceTo
     try:
         # boto3 is sync; run in worker thread.
         try:
-            ref_bytes = await anyio.to_thread.run_sync(partial(r2.download_bytes, key=payload.ref_audio_key))
+            ref_bytes = await anyio.to_thread.run_sync(partial(r2.download_bytes, key=ref_audio_key))
         except ClientError as exc:
             if _is_r2_not_found(exc):
                 raise AppError(
                     code="R2_KEY_NOT_FOUND",
-                    message="Reference audio key not found in R2",
+                    message="Reference audio not found in R2",
                     http_status=404,
-                    detail={"key": payload.ref_audio_key, "error_code": _r2_error_code(exc)},
+                    detail={"key": ref_audio_key, "error_code": _r2_error_code(exc), "user_id": payload.user_id},
                 ) from exc
             raise AppError(
                 code="R2_DOWNLOAD_FAILED",
                 message="Failed to download reference audio from R2",
                 http_status=502,
-                detail={"key": payload.ref_audio_key, "error_code": _r2_error_code(exc)},
+                detail={"key": ref_audio_key, "error_code": _r2_error_code(exc), "user_id": payload.user_id},
             ) from exc
         await anyio.to_thread.run_sync(Path(ref_path).write_bytes, ref_bytes)
 
-        mp3_bytes = await _generate_voice_mp3_core(request, ref_audio_path=ref_path, payload=payload)
+        # Download reference text from R2.
+        try:
+            ref_text_bytes = await anyio.to_thread.run_sync(partial(r2.download_bytes, key=ref_text_key))
+        except ClientError as exc:
+            if _is_r2_not_found(exc):
+                raise AppError(
+                    code="R2_KEY_NOT_FOUND",
+                    message="Reference text not found in R2",
+                    http_status=404,
+                    detail={"key": ref_text_key, "error_code": _r2_error_code(exc), "user_id": payload.user_id},
+                ) from exc
+            raise AppError(
+                code="R2_DOWNLOAD_FAILED",
+                message="Failed to download reference text from R2",
+                http_status=502,
+                detail={"key": ref_text_key, "error_code": _r2_error_code(exc), "user_id": payload.user_id},
+            ) from exc
+
+        try:
+            ref_text = ref_text_bytes.decode("utf-8").strip()
+        except Exception as exc:
+            raise AppError(
+                code="R2_TEXT_DECODE_FAILED",
+                message="Failed to decode reference text (expected utf-8)",
+                http_status=502,
+                detail={"key": ref_text_key, "user_id": payload.user_id, "error": repr(exc)},
+            ) from exc
+
+        if not ref_text:
+            raise AppError(
+                code="R2_TEXT_EMPTY",
+                message="Reference text is empty",
+                http_status=502,
+                detail={"key": ref_text_key, "user_id": payload.user_id},
+            )
+
+        core_payload = GenerateVoiceRequest(ref_text=ref_text, text=payload.text, language=payload.language)
+        mp3_bytes = await _generate_voice_mp3_core(request, ref_audio_path=ref_path, payload=core_payload)
 
         out_key = payload.key or f"voice/generated/{uuid.uuid4()}.mp3"
         try:

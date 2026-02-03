@@ -19,6 +19,47 @@ from app.domains.voice_generation.model import VOICE_MODEL_KEY
 from app.domains.voice_generation.schemas import GenerateVoiceRequest, GenerateVoiceToR2Request
 
 
+_OPEN_BRACKETS = {"(": ")", "[": "]", "{": "}"}
+_CLOSE_TO_OPEN = {")": "(", "]": "[", "}": "{"}
+
+
+def _strip_bracketed_segments(text: str) -> str:
+    """Remove any segments enclosed by (), [], {} (including the brackets).
+
+    Example: "안녕(웃음)[bg]{note}하세요" -> "안녕하세요"
+    """
+
+    if not text:
+        return text
+
+    stack: list[str] = []
+    out_chars: list[str] = []
+
+    for ch in text:
+        if ch in _OPEN_BRACKETS:
+            stack.append(ch)
+            continue
+        if ch in _CLOSE_TO_OPEN:
+            if stack:
+                # Pop one level if it matches, otherwise still treat as closing.
+                expected_open = _CLOSE_TO_OPEN[ch]
+                if stack[-1] == expected_open:
+                    stack.pop()
+                else:
+                    stack.pop()
+                continue
+            # Unbalanced closing bracket outside any bracketed segment: keep it.
+            out_chars.append(ch)
+            continue
+
+        if stack:
+            continue
+        out_chars.append(ch)
+
+    # Normalize whitespace introduced by removals.
+    return " ".join("".join(out_chars).split())
+
+
 def _normalize_prefix(prefix: str) -> str:
     prefix = (prefix or "").strip()
     if not prefix:
@@ -113,6 +154,18 @@ async def _generate_voice_mp3_core(
     payload: GenerateVoiceRequest,
 ) -> bytes:
     model, limit = _get_voice_model_and_limit(request)
+
+    ref_text_before = payload.ref_text
+    text_before = payload.text
+    ref_text_after = _strip_bracketed_segments(ref_text_before)
+    text_after = _strip_bracketed_segments(text_before)
+
+    print(f"[voice] ref_text before: {ref_text_before}")
+    print(f"[voice] ref_text after: {ref_text_after}")
+    print(f"[voice] text before: {text_before}")
+    print(f"[voice] text after: {text_after}")
+
+    payload = GenerateVoiceRequest(ref_text=ref_text_after, text=text_after, language=payload.language)
 
     async with limit.semaphore:
         try:
